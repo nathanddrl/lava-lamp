@@ -21,6 +21,7 @@ Pas de framework UI, pas de moteur physique externe.
 npm run dev        # serveur de dev
 npm run build      # typecheck (tsc --noEmit) + build Vite
 npm run typecheck
+npm test           # vitest (src/**/*.test.ts)
 ```
 
 ## Architecture
@@ -28,11 +29,16 @@ npm run typecheck
 ```
 src/
   sim/      Physique pure. AUCUN import de three ni du DOM.
-    lampProfile.ts   Profil de révolution unique (socle, verre, capuchon) + innerRadius(y).
-    simulation.ts    Simulation (step(dt) à pas fixe). Les particules viendront ici.
+    lampProfile.ts       Profil de révolution unique (socle, verre, capuchon) + innerRadius(y).
+    simulation.ts        Orchestration : step(dt) à pas fixe, reset, impulse.
+    waxSystem.ts         Cire : particules en TypedArrays, solveur Clavet 2005.
+    spatialHashGrid.ts   Grille de hachage spatial uniforme (voisinage).
+    random.ts            PRNG seedé (mulberry32).
+    *.test.ts            Tests vitest (grille vs force brute, stabilité de la cire).
   render/   Tout ce qui touche Three.js : scène, caméra, matériaux, shaders.
     lamp.ts          LatheGeometry des 3 pièces générées depuis LampProfile.
     stage.ts         Renderer, scène, OrbitControls bornés, lumières, sol, resize.
+    waxDebugView.ts  InstancedMesh de sphères (debug), interpolé entre deux pas fixes.
   ui/       Panneau lil-gui (debug). Ne contient pas de logique métier.
   main.ts   Assemblage + boucle (accumulateur à pas fixe).
 ```
@@ -62,6 +68,27 @@ Unités : **1 unité = 10 cm**, Y vers le haut, sol en y = 0, axe de la lampe en
 - `stage.render(alpha)` reçoit `alpha = accumulator / FIXED_DT` pour interpoler
   l'état entre deux steps (à exploiter quand les particules existent).
 
+### Cire (src/sim/waxSystem.ts)
+
+Clavet, Beaudoin & Poulin 2005, « Particle-based Viscoelastic Fluid Simulation ».
+Par sous-pas (2 par pas fixe → dt = 1/240 s) :
+gravité + traînée linéaire → voisinage (grille) → viscosité par impulsions radiales
+(paires i<j qui se rapprochent, impulsion bornée à la vitesse relative) → prédiction
+→ double density relaxation (Gauss-Seidel) → collisions (fond, plafond, paroi
+`innerRadius(y)` avec normale tenant compte de la pente, friction de Coulomb) → v = Δx/dt.
+
+Réglages par défaut (validés par `waxSystem.test.ts`) : h = 0.13, ρ0 = 3 (~30 voisins),
+k = 40, k near = 160, σ = 60, β = 20, gravité apparente 0.8, traînée 0.6, μ = 0.3.
+Leçons du réglage :
+- `k` élevé (≥ 100 avec ρ0 = 7) → la masse « bout » en permanence : le déplacement est
+  en dt²·k·Δρ sommé sur ~N voisins, il doit rester petit devant h.
+- Une friction appliquée comme facteur par sous-pas colle les particules au verre ;
+  la friction de Coulomb (∝ vitesse normale annulée) est indépendante du dt.
+- L'impulsion doit avoir un gradient (haut et cœur rapides, base posée), sinon le bloc
+  décolle entier sans s'étirer. Hauteur de référence = moyenne + 1.5σ (robuste aux isolées).
+
+Coût mesuré : ~1.5–1.9 ms CPU par pas fixe pour 400 particules (2 pas par frame à 60 fps).
+
 ## Conventions
 
 - TypeScript strict (+ `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`,
@@ -77,8 +104,8 @@ Unités : **1 unité = 10 cm**, Y vers le haut, sol en y = 0, axe de la lampe en
 ## Feuille de route
 
 1. ✅ Fondations : projet, profil de lampe, scène, contrôles, boucle à pas fixe.
-2. Particules : intégration, collisions avec `innerRadius(y)`, gravité/flottabilité, température.
-3. Cohésion / viscosité (voisinage via grille spatiale), réglage des comportements.
+2. ✅ Particules Clavet 2005 : cohésion, viscosité, collisions, grille spatiale, rendu debug.
+3. Thermique : chauffe par l'ampoule, refroidissement en haut, flottabilité fonction de T.
 4. Rendu raymarching du champ de densité dans le volume du verre (bornage par le profil).
 5. Matériaux : verre réfractif, liquide teinté, cire émissive/subsurface, glow de l'ampoule.
 6. Perf : profiling, résolution du raymarch adaptative, budget 60 fps.

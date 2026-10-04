@@ -1,4 +1,5 @@
 import type { ContainerShape } from './lampProfile';
+import { DEFAULT_WAX_PARAMS, WaxSystem, type WaxParams } from './waxSystem';
 
 export interface SimulationParams {
   /** Multiplicateur appliqué au temps réel avant l'accumulateur. */
@@ -7,24 +8,36 @@ export interface SimulationParams {
 }
 
 /**
- * Point d'entrée de la physique. Pour l'instant une coquille : elle avance le
- * temps à pas fixe. Les particules (cohésion, température, flottabilité)
- * viendront ici, sans jamais importer Three.js.
+ * Point d'entrée de la physique. Avance la cire à pas fixe. Ne dépend jamais
+ * de Three.js : le rendu lit `wax.positions` / `wax.previousStepPositions`.
  */
 export class Simulation {
   readonly container: ContainerShape;
   readonly params: SimulationParams = { timeScale: 1, paused: false };
+  readonly wax: WaxSystem;
   /** Temps simulé cumulé, en secondes. */
   time = 0;
   stepCount = 0;
 
-  constructor(container: ContainerShape) {
+  constructor(container: ContainerShape, waxParams: Partial<WaxParams> = {}) {
     this.container = container;
+    this.wax = new WaxSystem(container, { ...DEFAULT_WAX_PARAMS, ...waxParams });
   }
 
   /** Avance la simulation d'un pas fixe `dt` (secondes). */
   step(dt: number): void {
+    this.wax.step(dt);
     this.time += dt;
     this.stepCount++;
+  }
+
+  reset(): void {
+    this.wax.reset();
+    this.time = 0;
+    this.stepCount = 0;
+  }
+
+  impulse(): void {
+    this.wax.impulse();
   }
 }

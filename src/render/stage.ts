@@ -1,11 +1,13 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { LampProfile } from '../sim/lampProfile';
+import type { WaxSystem } from '../sim/waxSystem';
 import { createLampView, type LampView } from './lamp';
+import { WaxDebugView } from './waxDebugView';
 
 /**
  * Scène, caméra, contrôles, lumières et renderer. Ne connaît la simulation
- * qu'à travers le profil de la lampe (et, plus tard, un buffer de particules).
+ * qu'à travers le profil de la lampe et les buffers de positions de la cire.
  */
 export class Stage {
   readonly renderer: THREE.WebGLRenderer;
@@ -13,6 +15,7 @@ export class Stage {
   readonly camera: THREE.PerspectiveCamera;
   readonly controls: OrbitControls;
   readonly lamp: LampView;
+  readonly waxDebug = new WaxDebugView();
 
   private readonly container: HTMLElement;
   private readonly resizeObserver: ResizeObserver;
@@ -53,6 +56,7 @@ export class Stage {
 
     this.lamp = createLampView(profile);
     this.scene.add(this.lamp.group);
+    this.scene.add(this.waxDebug.mesh);
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(container);
@@ -95,10 +99,11 @@ export class Stage {
   }
 
   /**
-   * @param _alpha fraction [0, 1) du pas fixe écoulée depuis le dernier step,
-   * pour interpoler l'état de la simulation (inutilisé tant qu'il n'y a pas de particules).
+   * @param alpha fraction [0, 1) du pas fixe écoulée depuis le dernier step :
+   * le rendu interpole entre les deux derniers états de la simulation.
    */
-  render(_alpha: number): void {
+  render(wax: WaxSystem, alpha: number): void {
+    this.waxDebug.update(wax, alpha);
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
   }
@@ -107,6 +112,7 @@ export class Stage {
     this.resizeObserver.disconnect();
     this.controls.dispose();
     this.lamp.dispose();
+    this.waxDebug.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }
