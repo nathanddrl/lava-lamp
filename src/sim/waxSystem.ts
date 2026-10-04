@@ -15,10 +15,11 @@ import { SpatialHashGrid } from './spatialHashGrid';
  *   6. v = (x − x_prev) / dt
  *
  * Thermique (par particule, T ∈ [0, 1]) :
- *   dT/dt = chauffe(y)·(1 − T) − refroidissement(y)·exposition·T + conduction
+ *   dT/dt = chauffe(y)·(1 − T) + échange(y)·exposition·(T_amb(y) − T) + conduction
  *   - chauffe(y, r) = heatRate · exp(−(y − yMin) / heatFalloff) · exp(−(r / heatRadius)²) :
  *     ampoule sous le centre du fond ;
- *   - refroidissement(y, r) = coolRate · (1 + coolTopBoost · hauteur^coolTopExponent
+ *   - échange avec le liquide vers T_amb(y) (stratifiée : chaude au fond, neutre au
+ *     milieu, froide sous le capuchon), au taux coolRate · (1 + coolTopBoost · hauteur^coolTopExponent
  *     + wallCooling · (r / R(y))⁴) : plus fort en haut et contre le verre, par où la
  *     chaleur quitte la lampe ; le panache central garde sa chaleur ;
  *   - exposition : 1 en surface, `interiorCooling` au cœur (estimée par la densité
@@ -54,6 +55,13 @@ export interface WaxParams {
   viscosityLinear: number;
   /** β : viscosité quadratique. */
   viscosityQuadratic: number;
+  /**
+   * Multiplicateur de viscosité (σ et β) pour une paire de cire chaude : 1 = viscosité
+   * uniforme ; < 1 = cire chaude fluide (le col des colonnes se rompt), cire froide
+   * épaisse (le réservoir ne se laisse pas aspirer). Interpolé sur la bande d'hystérésis
+   * selon la température moyenne de la paire.
+   */
+  viscosityHotFactor: number;
   /** Poids apparent résiduel (poids − poussée) à la température neutre, unités/s². */
   gravity: number;
   /** Accélération verticale par unité d'écart à la température neutre, unités/s². */
@@ -78,8 +86,21 @@ export interface WaxParams {
   heatFalloff: number;
   /** Rayon caractéristique de la tache chaude au-dessus de l'ampoule (gaussienne). */
   heatRadius: number;
-  /** Taux de refroidissement de base vers le liquide, 1/s. */
+  /** Taux d'échange de base avec le liquide (relaxation vers T_amb), 1/s. */
   coolRate: number;
+  /**
+   * Température ambiante du liquide, stratifiée : `ambientBottom` près du fond,
+   * `ambientMid` sur la zone médiane, `ambientTop` sous le capuchon. Placer la zone
+   * médiane dans la bande morte de l'hystérésis empêche une goutte de changer d'état
+   * en route. Tout à 0 = refroidissement vers 0 partout (modèle de l'étape 3).
+   */
+  ambientBottom: number;
+  ambientMid: number;
+  ambientTop: number;
+  /** Hauteur normalisée où l'ambiance du fond rejoint celle de la zone médiane. */
+  ambientBottomHeight: number;
+  /** Hauteur normalisée où commence la transition vers l'ambiance du haut. */
+  ambientTopStart: number;
   /** Surcroît de refroidissement en haut : × (1 + boost · hauteur normalisée^exposant). */
   coolTopBoost: number;
   /** Exposant du profil de refroidissement : plus il est grand, plus le froid est concentré en haut. */
@@ -119,27 +140,36 @@ export const DEFAULT_WAX_PARAMS: WaxParams = {
   restDensity: 3,
   stiffness: 32,
   nearStiffness: 127,
-  // Cohésion réduite : sans ça, la flottabilité n'arrive jamais à détacher une goutte.
-  cohesion: 0.5,
-  // Viscosité forte : la cire reste épaisse et lente.
+  // Cohésion légèrement réduite : les colonnes peuvent se rompre en gouttes.
+  cohesion: 0.8,
+  // Viscosité forte pour la cire figée, ×0.05 pour la cire fondue : le réservoir
+  // résiste, le col des colonnes se rompt plus tôt (utile avec wallCooling).
   viscosityLinear: 60,
   viscosityQuadratic: 20,
+  viscosityHotFactor: 0.05,
   gravity: 0,
   // Forces fortes + traînée forte : assez pour vaincre le seuil d'écoulement du
-  // fluide de Clavet, vitesse de croisière lente (~0.1 u/s).
-  buoyancy: 40,
-  // Plafond très haut : flottabilité linéaire en pratique (la saturation reste dispo).
+  // fluide de Clavet, vitesse de croisière lente.
+  buoyancy: 60,
   buoyancyMax: 1000,
   neutralTemperature: 0.5,
   meltHysteresis: 0.3,
-  heatRate: 2.5,
-  heatFalloff: 0.06,
-  heatRadius: 0.1,
-  coolRate: 0.01,
-  coolTopBoost: 150,
+  // Point chaud mince et étroit : seule une petite fraction du réservoir fond à la fois.
+  heatRate: 4,
+  heatFalloff: 0.03,
+  heatRadius: 0.05,
+  // Ambiance stratifiée : sous la bande morte au fond (le réservoir reste figé),
+  // au centre de la bande au milieu (aucune bascule en route), froide sous le capuchon.
+  coolRate: 0.1,
+  ambientBottom: 0.2,
+  ambientMid: 0.5,
+  ambientTop: 0.05,
+  ambientBottomHeight: 0.15,
+  ambientTopStart: 0.9,
+  coolTopBoost: 30,
   coolTopExponent: 8,
   wallCooling: 10,
-  interiorCooling: 0.15,
+  interiorCooling: 0.4,
   conductivity: 1,
   drag: 60,
   wallFriction: 0.3,
@@ -159,6 +189,10 @@ export const NO_THERMAL_PARAMS: Partial<WaxParams> = {
   coolRate: 0,
   conductivity: 0,
   meltHysteresis: 0,
+  ambientBottom: 0,
+  ambientMid: 0,
+  ambientTop: 0,
+  viscosityHotFactor: 1,
   cohesion: 1,
   drag: 0.6,
 };
@@ -309,6 +343,7 @@ export class WaxSystem {
     const { positions, temperatures: T, densities, count, container } = this;
     const { heatRate, heatFalloff, heatRadius, coolRate, coolTopBoost, coolTopExponent, wallCooling, interiorCooling, restDensity } =
       this.params;
+    const { ambientBottom, ambientMid, ambientTop, ambientBottomHeight, ambientTopStart } = this.params;
     const invRadius2 = 1 / Math.max(1e-6, heatRadius * heatRadius);
     if (heatRate === 0 && coolRate === 0) return;
     const invFalloff = 1 / Math.max(1e-3, heatFalloff);
@@ -330,9 +365,13 @@ export class WaxSystem {
         wall = wallCooling * u * u;
       }
       const cool = coolRate * (1 + coolTopBoost * Math.pow(hn, coolTopExponent) + wall) * shield;
+      const amb =
+        ambientMid +
+        (ambientBottom - ambientMid) * (1 - smoothstep(0, ambientBottomHeight, hn)) +
+        (ambientTop - ambientMid) * smoothstep(ambientTopStart, 1, hn);
       const t = T[i]!;
-      // Implicite par rapport aux taux : reste dans [0, 1] quel que soit dt.
-      T[i] = clamp((t + dt * heat) / (1 + dt * (heat + cool)), 0, 1);
+      // dT = chauffe·(1 − T) + échange·(T_amb − T), implicite : stable quel que soit dt.
+      T[i] = clamp((t + dt * (heat + cool * amb)) / (1 + dt * (heat + cool)), 0, 1);
     }
   }
 
@@ -367,6 +406,10 @@ export class WaxSystem {
     const invH = 1 / h;
     const sigma = this.params.viscosityLinear;
     const beta = this.params.viscosityQuadratic;
+    const { viscosityHotFactor, neutralTemperature, meltHysteresis } = this.params;
+    const thermalVisc = viscosityHotFactor !== 1;
+    const viscLow = neutralTemperature - 0.5 * meltHysteresis;
+    const invViscBand = 1 / Math.max(0.05, meltHysteresis);
 
     for (let i = 0; i < count; i++) {
       const base = i * MAX_NEIGHBORS;
@@ -393,8 +436,13 @@ export class WaxSystem {
         const u =
           (v[3 * i]! - v[3 * j]!) * rx + (v[3 * i + 1]! - v[3 * j + 1]!) * ry + (v[3 * i + 2]! - v[3 * j + 2]!) * rz;
         if (u <= 0) continue;
+        let visc = 1;
+        if (thermalVisc) {
+          const hot = clamp((0.5 * (T[i]! + T[j]!) - viscLow) * invViscBand, 0, 1);
+          visc = 1 + (viscosityHotFactor - 1) * hot;
+        }
         // Borné à u : l'impulsion annule au plus la vitesse relative, jamais ne l'inverse.
-        const mag = Math.min(u, dt * (1 - q) * (sigma * u + beta * u * u)) * 0.5;
+        const mag = Math.min(u, dt * (1 - q) * visc * (sigma * u + beta * u * u)) * 0.5;
         const ix = mag * rx;
         const iy = mag * ry;
         const iz = mag * rz;
@@ -573,6 +621,11 @@ export class WaxSystem {
       v[3 * i + 2] = vz;
     }
   }
+}
+
+function smoothstep(e0: number, e1: number, x: number): number {
+  const t = clamp((x - e0) / Math.max(1e-6, e1 - e0), 0, 1);
+  return t * t * (3 - 2 * t);
 }
 
 function clamp(v: number, lo: number, hi: number): number {
