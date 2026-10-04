@@ -7,7 +7,7 @@ const FIXED_DT = SIM_FIXED_DT;
 /** Au-delà, on considère que l'onglet a été suspendu : on ne rattrape pas. */
 const MAX_FRAME_DT = 0.1;
 /** Garde-fou contre la spirale de la mort si un step devient trop coûteux. */
-const MAX_STEPS_PER_FRAME = 8;
+const MAX_STEPS_PER_FRAME = 12;
 
 const app = document.getElementById('app');
 if (!app) throw new Error('#app introuvable');
@@ -16,7 +16,7 @@ const profile = new LampProfile();
 const sim = new Simulation(profile);
 const stage = new Stage(app, profile);
 
-const stats: LoopStats = { fps: 0, stepsPerFrame: 0, stepMs: 0, simTime: 0 };
+const stats: LoopStats = { fps: 0, stepsPerFrame: 0, stepMs: 0, simTime: 0, realSpeed: 0 };
 const gui = createDebugPanel({
   simParams: sim.params,
   waxParams: sim.wax.params,
@@ -36,6 +36,7 @@ let lastTime: number | null = null;
 let fpsFrames = 0;
 let fpsWindowStart = 0;
 let stepMsAvg = 0;
+let simTimeWindowStart = 0;
 
 function frame(now: number): void {
   if (lastTime === null) {
@@ -66,6 +67,9 @@ function frame(now: number): void {
   fpsFrames++;
   if (now - fpsWindowStart >= 500) {
     stats.fps = Math.round((fpsFrames * 1000) / (now - fpsWindowStart));
+    // Vitesse effectivement atteinte : plafonnée par le coût CPU de la physique.
+    stats.realSpeed = Math.round(((sim.time - simTimeWindowStart) * 1000 * 10) / (now - fpsWindowStart)) / 10;
+    simTimeWindowStart = sim.time;
     fpsFrames = 0;
     fpsWindowStart = now;
     stats.stepMs = Math.round(stepMsAvg * 100) / 100;

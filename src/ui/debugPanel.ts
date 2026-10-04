@@ -10,6 +10,8 @@ export interface LoopStats {
   /** Temps CPU moyen d'un pas fixe de simulation, en ms. */
   stepMs: number;
   simTime: number;
+  /** Vitesse réellement atteinte (temps simulé / temps réel). */
+  realSpeed: number;
 }
 
 export interface DebugPanelTargets {
@@ -29,7 +31,7 @@ export function createDebugPanel(t: DebugPanelTargets): GUI {
 
   const sim = gui.addFolder('Simulation');
   sim.add(t.simParams, 'paused').name('pause');
-  sim.add(t.simParams, 'timeScale', 0, 4, 0.05).name('vitesse');
+  sim.add(t.simParams, 'timeScale', 0, 10, 0.1).name('vitesse');
   sim.add(actions, 'impulse').name('impulsion ↑');
   sim.add(actions, 'reset').name('reset');
   sim
@@ -86,6 +88,7 @@ export function createDebugPanel(t: DebugPanelTargets): GUI {
 
   const stats = gui.addFolder('Stats');
   stats.add(t.stats, 'fps').name('fps').disable().listen();
+  stats.add(t.stats, 'realSpeed').name('vitesse réelle ×').disable().listen();
   stats.add(t.stats, 'stepsPerFrame').name('steps / frame').disable().listen();
   stats.add(t.stats, 'stepMs').name('ms / step').disable().listen();
   stats.add(t.stats, 'simTime').name('temps simulé (s)').disable().listen();
