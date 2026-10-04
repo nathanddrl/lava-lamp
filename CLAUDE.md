@@ -22,8 +22,8 @@ npm run dev        # serveur de dev
 npm run build      # typecheck (tsc --noEmit) + build Vite
 npm run typecheck
 npm test           # vitest (src/**/*.test.ts)
-npm run bench -- [--preset calme] [--seconds 300] [--set clé=valeur ...] [--sections 10]
-                   # banc headless : métriques du cycle thermique (+ coupes ASCII)
+npm run bench -- [--preset calme] [--seconds 600] [--set clé=valeur ...] [--summary] [--sections 10]
+                   # banc headless : répartition, suivi des gouttes, verdicts (+ coupes ASCII)
 ```
 
 ## Architecture
@@ -45,7 +45,8 @@ src/
   ui/       Panneau lil-gui (debug). Ne contient pas de logique métier.
   main.ts   Assemblage + boucle (accumulateur à pas fixe).
 scripts/
-  bench.ts  Banc headless (tsx) : répartition par hauteur, amas, vitesses, trajets.
+  bench.ts  Banc headless (tsx) : répartition par hauteur, suivi individuel des gouttes
+            (taille, hauteur max, fusions en vol, départs), ligne OBJECTIFS en fin de run.
 ```
 
 Sens des dépendances : `main → render → sim`, `main → ui`, `main → sim`. Jamais `sim → render/ui`.
@@ -77,7 +78,7 @@ Unités : **1 unité = 10 cm**, Y vers le haut, sol en y = 0, axe de la lampe en
 ### Cire (src/sim/waxSystem.ts)
 
 Clavet, Beaudoin & Poulin 2005, « Particle-based Viscoelastic Fluid Simulation ».
-Par sous-pas (2 par pas fixe → dt = 1/240 s) :
+Par sous-pas (2 par pas fixe → dt = 1/120 s) :
 gravité + traînée linéaire → voisinage (grille) → viscosité par impulsions radiales
 (paires i<j qui se rapprochent, impulsion bornée à la vitesse relative) → prédiction
 → double density relaxation (Gauss-Seidel) → collisions (fond, plafond, paroi
@@ -94,41 +95,59 @@ Leçons du réglage mécanique :
 - L'impulsion doit avoir un gradient (haut et cœur rapides, base posée), sinon le bloc
   décolle entier sans s'étirer.
 
-### Thermique (étape 3)
+### Thermique (étapes 3 et 3 bis)
 
-T ∈ [0, 1] par particule. Chauffe gaussienne au centre du fond (contact seulement),
-refroidissement fort en haut (profil hauteur^8) et contre le verre, atténué au cœur des
-blobs (exposition estimée par la densité), conduction entre voisins sur les paires de la
-viscosité. Flottabilité ∝ (T − Tn), avec **hystérésis de fusion** : Tn − δ/2 pour une
-particule fondue, Tn + δ/2 pour une figée.
+T ∈ [0, 1] par particule :
 
-Démarche (≈ 60 configurations au banc, voir `npm run bench`) et pourquoi chaque ingrédient
-existe — **ne pas les retirer sans repasser au banc** :
-1. Forces faibles (flottabilité ~1) → tout reste figé : le fluide de Clavet a un seuil
-   d'écoulement. Il faut des forces fortes (buoyancy 40) **et** une traînée forte (60)
-   pour garder ~0.1 u/s.
-2. Taux thermiques ~1/s → chaque particule prend la température d'équilibre de sa
-   hauteur → strates immobiles. Il faut de l'inertie thermique (refroidissement
-   ~0.01/s hors du haut) pour qu'une goutte garde sa chaleur pendant la montée.
-3. Chauffe qui décroît en douceur avec la hauteur → attracteur « boule qui flotte » à
-   l'altitude où chauffe = refroidissement. Chauffe au contact seulement (falloff 0.06).
-4. Même ainsi, sans hystérésis : convection stationnaire (pilier immobile) ou réservoir
-   posé à T = Tn. L'hystérésis de fusion (δ = 0.3) transforme ça en oscillateur de
-   relaxation : c'est elle qui crée le cycle.
-5. Cohésion pleine (1) → la tige aspire tout le réservoir et la masse monte d'un bloc.
-   cohesion = 0.5 laisse les gouttes se détacher.
+    dT/dt = chauffe(y, r)·(1 − T) + échange(y, r)·exposition·(T_amb(y) − T) + conduction
 
-Résultats au banc (5 min simulées, graine 1) :
+- **Chauffe** : point chaud gaussien mince et étroit au centre du fond (falloff 0.03,
+  rayon 0.05) → seule une petite fraction du réservoir fond à la fois, colonne étroite.
+- **Ambiance stratifiée T_amb(y)** : 0.2 au fond (sous la bande morte → le réservoir reste
+  figé), 0.5 sur toute la zone médiane (au centre de la bande morte → une goutte ne change
+  jamais d'état en route), 0.05 sous le capuchon à partir de 90 % de la hauteur.
+- **Échange** avec le liquide : taux × (1 + boost haut + boost paroi), atténué au cœur des
+  blobs (exposition estimée par la densité locale).
+- **Flottabilité** ∝ (T − Tn) avec **hystérésis de fusion** (δ = 0.3) : Tn − δ/2 pour une
+  particule fondue, Tn + δ/2 pour une figée (bascule de Schmitt).
+- **Viscosité thermique** : σ et β × 0.05 pour la cire fondue (interpolé sur la bande).
 
-| preset    | réservoir (bas 20 %) min / moy | montée médiane | stagnation / collé en haut |
-|-----------|--------------------------------|----------------|----------------------------|
-| équilibré | 37 % / 58 %                    | 17 s           | 0 / 0                      |
-| calme     | 46 % / 78 %                    | (rare > 75 %)  | 0 / 0                      |
-| agité     | 39 % / 57 %                    | 7 s            | 0 / 0                      |
+Pourquoi chaque ingrédient existe — **ne rien retirer sans repasser au banc** :
+1. Forces faibles → tout reste figé (le fluide de Clavet a un seuil d'écoulement). Il faut
+   des forces fortes (buoyancy 60) et une traînée forte (60).
+2. Taux thermiques rapides sans stratification → strates immobiles ; chauffe qui décroît
+   en douceur → « boule qui flotte » à l'équilibre chauffe = refroidissement.
+3. Sans hystérésis : convection stationnaire ou réservoir posé à T = Tn. L'hystérésis
+   crée l'oscillateur de relaxation.
+4. Étape 3 (refroidissement vers 0 partout) : les têtes se refigeaient vers 60–75 % de la
+   hauteur. L'ambiance médiane dans la bande morte les laisse monter jusqu'au capuchon.
+   Piège : une ambiance de fond dans la bande morte (0.6) laisse tout le réservoir fondu
+   → il monte d'un bloc. Le fond doit être sous Tn − δ/2.
+5. Avec ambiance stratifiée mais chauffe large : une tige continue relie réservoir et
+   capuchon (fontaine), le réservoir se vide. La chauffe localisée tarit l'alimentation.
+6. Calotte suspendue sous le capuchon (cœur protégé, encore fondu) qui accumule les
+   arrivées : échange haut ×30 et `interiorCooling` 0.4.
+7. Ablation (10 min) : sans ambiance → figé ; sans chauffe localisée → réservoir effondré,
+   amas de 800 ; sans viscosité thermique **avec** échange paroi → gouttes trop grosses
+   (médiane 120–145) ; l'échange paroi (10) double la fréquence des gouttes. Les deux
+   derniers ne valent qu'ensemble.
 
-Limites connues : les gouttes détachées sont souvent grosses (~400 particules, la moitié
-de la cire) avec quelques petites (10–40) ; les têtes s'aplatissent vers 65–75 % de la
-hauteur plutôt que sous le capuchon.
+Comportement observé : la colonne monte jusqu'au capuchon puis se rompt à la base ; la
+tête s'aplatit, refroidit et redescend. Les gouttes se détachent donc en haut, pas à
+mi-hauteur (métrique « montée » ≈ 0 s). Le seuil de démarrage est abrupt : chauffe < ~4
+ou traînée ≥ 80 → le point chaud ne fond plus et tout se fige.
+
+Résultats au banc (10 min simulées, après 60 s de mise en route, graine 1) :
+
+| preset    | réservoir min/moy | gouttes/min | taille médiane (max) | 40–150 | têtes ≥ 90 % | plus longue pause |
+|-----------|-------------------|-------------|----------------------|--------|--------------|-------------------|
+| équilibré | 71 % / 76 %       | 4.2         | 130 (229)            | 50 %   | 94 %         | 0 s               |
+| calme     | 68 % / 75 %       | 2.2         | 162 (243)            | 25 %   | 83 %         | 28 s              |
+| agité     | 71 % / 74 %       | 2.0         | 143 (224)            | 39 %   | 82 %         | 0 s               |
+
+Équilibré sur 5 graines : objectifs tenus sur 4 ; la graine 2 est à 50 % pile dans 40–150
+à la naissance (sous 50 % en taille max). Variété : 2 à 9 fusions en vol par run,
+intervalles entre départs irréguliers (CV 0.8 à 2.4).
 
 Coût mesuré : ~3 ms CPU par pas fixe (800 particules), 1 pas par frame à 60 fps.
 
@@ -149,6 +168,7 @@ Coût mesuré : ~3 ms CPU par pas fixe (800 particules), 1 pas par frame à 60 f
 1. ✅ Fondations : projet, profil de lampe, scène, contrôles, boucle à pas fixe.
 2. ✅ Particules Clavet 2005 : cohésion, viscosité, collisions, grille spatiale, rendu debug.
 3. ✅ Thermique : cycle chauffe/montée/refroidissement/descente, presets, banc headless.
+   ✅ 3 bis : ambiance stratifiée, chauffe localisée, viscosité thermique (gouttes 40–150, têtes > 90 %).
 4. Rendu raymarching du champ de densité dans le volume du verre (bornage par le profil).
 5. Matériaux : verre réfractif, liquide teinté, cire émissive/subsurface, glow de l'ampoule.
 6. Perf : profiling, résolution du raymarch adaptative, budget 60 fps.

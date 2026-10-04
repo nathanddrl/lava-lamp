@@ -78,31 +78,36 @@ describe('WaxSystem (Clavet 2005)', () => {
     expect(clusters(sim)[0]).toBeGreaterThanOrEqual(sim.wax.count - 2);
   }, 60_000);
 
-  it('cycle thermique (preset par défaut) : la cire monte, redescend, le réservoir reste', () => {
+  it('cycle thermique (preset par défaut) : des têtes atteignent le haut, le réservoir tient, ça ne s\'arrête pas', () => {
     const sim = new Simulation(new LampProfile());
     const { yMin, yMax } = sim.container;
     const H = yMax - yMin;
-    let reachedHigh = 0;
+    let highSamples = 0;
+    let idle = 0;
+    let longestIdle = 0;
     let minReservoir = 1;
-    let maxReservoir = 0;
-    for (let t = 0; t < 150; t += 5) {
-      run(sim, 5);
+    for (let t = 0; t < 180; t += 2) {
+      run(sim, 2);
       const { positions: x, temperatures: T, count: n } = sim.wax;
       let bottom = 0;
+      let upper = 0;
+      let high = false;
       for (let i = 0; i < n; i++) {
         expect(T[i]).toBeGreaterThanOrEqual(0);
         expect(T[i]).toBeLessThanOrEqual(1);
         const y = x[3 * i + 1]!;
         if (y < yMin + 0.2 * H) bottom++;
-        if (y > yMin + 0.6 * H) reachedHigh++;
+        if (y > yMin + 0.5 * H) upper++;
+        if (y > yMin + 0.9 * H) high = true;
       }
-      if (t >= 60) {
-        minReservoir = Math.min(minReservoir, bottom / n);
-        maxReservoir = Math.max(maxReservoir, bottom / n);
-      }
+      if (t < 60) continue;
+      if (high) highSamples++;
+      minReservoir = Math.min(minReservoir, bottom / n);
+      idle = upper < 0.01 * n ? idle + 2 : 0;
+      longestIdle = Math.max(longestIdle, idle);
     }
-    expect(reachedHigh).toBeGreaterThan(0); // de la cire a atteint le haut
-    expect(minReservoir).toBeGreaterThan(0.2); // le réservoir ne se vide jamais
-    expect(maxReservoir).toBeGreaterThan(minReservoir + 0.15); // et ça bouge : pas d'état figé
+    expect(highSamples).toBeGreaterThan(0); // des têtes dépassent 90 % de la hauteur
+    expect(minReservoir).toBeGreaterThanOrEqual(0.4); // le réservoir garde au moins 40 %
+    expect(longestIdle).toBeLessThan(60); // jamais de minute sans cire en haut
   }, 120_000);
 });
