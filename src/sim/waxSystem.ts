@@ -6,13 +6,29 @@ import { SpatialHashGrid } from './spatialHashGrid';
  * Cire en particules, méthode « double density relaxation » de Clavet, Beaudoin
  * & Poulin 2005 (Particle-based Viscoelastic Fluid Simulation) :
  *
- *   1. forces externes sur v (gravité, traînée du liquide environnant)
- *   2. viscosité par impulsions radiales entre paires (sur v)
+ *   1. forces externes sur v (gravité, flottabilité thermique, traînée du liquide)
+ *   2. viscosité par impulsions radiales entre paires (sur v) + conduction thermique
  *   3. prédiction : x_prev = x ; x += v·dt
  *   4. relaxation de double densité (sur x) : pression + pression « near »
  *      → cohésion et pseudo tension de surface sans résoudre Navier-Stokes
  *   5. collisions avec le récipient (sur x)
  *   6. v = (x − x_prev) / dt
+ *
+ * Thermique (par particule, T ∈ [0, 1]) :
+ *   dT/dt = chauffe(y)·(1 − T) − refroidissement(y)·exposition·T + conduction
+ *   - chauffe(y, r) = heatRate · exp(−(y − yMin) / heatFalloff) · exp(−(r / heatRadius)²) :
+ *     ampoule sous le centre du fond ;
+ *   - refroidissement(y, r) = coolRate · (1 + coolTopBoost · hauteur^coolTopExponent
+ *     + wallCooling · (r / R(y))⁴) : plus fort en haut et contre le verre, par où la
+ *     chaleur quitte la lampe ; le panache central garde sa chaleur ;
+ *   - exposition : 1 en surface, `interiorCooling` au cœur (estimée par la densité
+ *     locale), d'où un cœur de blob qui reste chaud plus longtemps que sa peau ;
+ *   - conduction : échange κ·(1 − r/h)²·(Tj − Ti) entre voisins (conservatif).
+ *   Flottabilité : a_y = −gravity + amax · tanh(buoyancy · (T − neutralTemperature) / amax),
+ *   soit buoyancy · (T − Tn) près de la neutralité, saturé à ±amax (= buoyancyMax).
+ *   Avec une hystérésis de fusion δ, Tn vaut Tn − δ/2 pour une particule fondue et
+ *   Tn + δ/2 pour une particule figée (bascule de Schmitt) : c'est ce qui transforme
+ *   la convection stationnaire en cycle de relaxation (gouttes qui montent et redescendent).
  *
  * Toutes les données sont dans des TypedArrays alloués au reset ; `step()`
  * n'alloue rien.
@@ -29,12 +45,51 @@ export interface WaxParams {
   stiffness: number;
   /** k near : raideur de la pression proche (anti-agglutinement, tension de surface). */
   nearStiffness: number;
+  /**
+   * Facteur appliqué à la pression négative (ρ < ρ0), qui fait la cohésion.
+   * 1 = papier ; plus bas, la cire se déchire plus facilement en gouttes.
+   */
+  cohesion: number;
   /** σ : viscosité linéaire. */
   viscosityLinear: number;
   /** β : viscosité quadratique. */
   viscosityQuadratic: number;
-  /** Gravité apparente (poids − poussée), unités/s². */
+  /** Poids apparent résiduel (poids − poussée) à la température neutre, unités/s². */
   gravity: number;
+  /** Accélération verticale par unité d'écart à la température neutre, unités/s². */
+  buoyancy: number;
+  /**
+   * Plafond de l'accélération de flottabilité (saturation en tanh). Modélise la
+   * dilatation brutale de la cire autour de sa fusion : gain fort près de la
+   * température neutre, vitesse de croisière bornée. Infinity = linéaire pur.
+   */
+  buoyancyMax: number;
+  /** Température à laquelle la cire a la densité du liquide. */
+  neutralTemperature: number;
+  /**
+   * Hystérésis de fusion δ : la cire figée ne devient flottante qu'au-dessus de
+   * Tn + δ/2, la cire fondue ne redevient dense qu'en dessous de Tn − δ/2
+   * (chaleur latente, surfusion). 0 = flottabilité linéaire pure.
+   */
+  meltHysteresis: number;
+  /** Taux de chauffe au fond du récipient, 1/s. */
+  heatRate: number;
+  /** Hauteur caractéristique de décroissance de la chauffe au-dessus du fond. */
+  heatFalloff: number;
+  /** Rayon caractéristique de la tache chaude au-dessus de l'ampoule (gaussienne). */
+  heatRadius: number;
+  /** Taux de refroidissement de base vers le liquide, 1/s. */
+  coolRate: number;
+  /** Surcroît de refroidissement en haut : × (1 + boost · hauteur normalisée^exposant). */
+  coolTopBoost: number;
+  /** Exposant du profil de refroidissement : plus il est grand, plus le froid est concentré en haut. */
+  coolTopExponent: number;
+  /** Surcroît de refroidissement près du verre : × (… + wallCooling · (r / R)⁴). */
+  wallCooling: number;
+  /** Fraction du refroidissement subie par une particule entièrement entourée. */
+  interiorCooling: number;
+  /** Conduction entre voisins, 1/s. */
+  conductivity: number;
   /** Traînée linéaire du liquide environnant, 1/s. */
   drag: number;
   /** Coefficient de friction de Coulomb μ contre le verre (indépendant du dt). */
@@ -43,30 +98,69 @@ export interface WaxParams {
   particleRadius: number;
   /** Vitesse verticale max donnée par le bouton « impulsion ». */
   impulseStrength: number;
+  /** Largeur du jet d'impulsion, en fraction du rayon intérieur du verre. */
+  impulseWidth: number;
   /** Garde-fou contre l'explosion numérique. */
   maxSpeed: number;
   substeps: number;
   seed: number;
 }
 
+/**
+ * Réglage de référence = preset « équilibré » (800 particules, pas fixe 1/60 s ×
+ * 2 sous-pas), réglé au banc headless (`npm run bench`). Voir CLAUDE.md pour la
+ * démarche et src/sim/presets.ts pour les variantes.
+ */
 export const DEFAULT_WAX_PARAMS: WaxParams = {
-  particleCount: 400,
-  interactionRadius: 0.13,
+  particleCount: 800,
+  // Volume de cire constant par rapport à 400 particules / h = 0.13 : h ∝ N^(−1/3).
+  interactionRadius: 0.103,
   // ≈ 30 voisins par particule au repos : cohésion correcte, coût maîtrisé.
   restDensity: 3,
-  stiffness: 40,
-  nearStiffness: 160,
-  // Viscosité forte : dt·σ ≈ 0.25 par sous-pas, la cire reste épaisse et lente.
+  stiffness: 32,
+  nearStiffness: 127,
+  // Cohésion réduite : sans ça, la flottabilité n'arrive jamais à détacher une goutte.
+  cohesion: 0.5,
+  // Viscosité forte : la cire reste épaisse et lente.
   viscosityLinear: 60,
   viscosityQuadratic: 20,
-  gravity: 0.8,
-  drag: 0.6,
+  gravity: 0,
+  // Forces fortes + traînée forte : assez pour vaincre le seuil d'écoulement du
+  // fluide de Clavet, vitesse de croisière lente (~0.1 u/s).
+  buoyancy: 40,
+  // Plafond très haut : flottabilité linéaire en pratique (la saturation reste dispo).
+  buoyancyMax: 1000,
+  neutralTemperature: 0.5,
+  meltHysteresis: 0.3,
+  heatRate: 2.5,
+  heatFalloff: 0.06,
+  heatRadius: 0.1,
+  coolRate: 0.01,
+  coolTopBoost: 150,
+  coolTopExponent: 8,
+  wallCooling: 10,
+  interiorCooling: 0.15,
+  conductivity: 1,
+  drag: 60,
   wallFriction: 0.3,
-  particleRadius: 0.03,
-  impulseStrength: 10,
+  particleRadius: 0.024,
+  impulseStrength: 13,
+  impulseWidth: 0.8,
   maxSpeed: 8,
   substeps: 2,
   seed: 1,
+};
+
+/** Paramètres qui coupent la thermique (étape 2 : gravité seule, cire passive). */
+export const NO_THERMAL_PARAMS: Partial<WaxParams> = {
+  gravity: 0.8,
+  buoyancy: 0,
+  heatRate: 0,
+  coolRate: 0,
+  conductivity: 0,
+  meltHysteresis: 0,
+  cohesion: 1,
+  drag: 0.6,
 };
 
 export const MAX_PARTICLES = 4000;
@@ -83,6 +177,12 @@ export class WaxSystem {
   /** Positions au début du dernier `step()`, pour l'interpolation du rendu. */
   previousStepPositions = new Float32Array(0);
   velocities = new Float32Array(0);
+  /** Température par particule, 0 = froid, 1 = chaud. */
+  temperatures = new Float32Array(0);
+  /** Densité locale au dernier sous-pas (sert d'indicateur de surface). */
+  densities = new Float32Array(0);
+  /** État de fusion par particule (1 = fondue, flottante), cf. `meltHysteresis`. */
+  molten = new Uint8Array(0);
 
   private predictedFrom = new Float32Array(0);
   private neighborCount = new Int32Array(0);
@@ -102,6 +202,9 @@ export class WaxSystem {
       this.positions = new Float32Array(3 * n);
       this.previousStepPositions = new Float32Array(3 * n);
       this.velocities = new Float32Array(3 * n);
+      this.temperatures = new Float32Array(n);
+      this.densities = new Float32Array(n);
+      this.molten = new Uint8Array(n);
       this.predictedFrom = new Float32Array(3 * n);
       this.neighborCount = new Int32Array(n);
       this.neighbors = new Int32Array(n * MAX_NEIGHBORS);
@@ -124,6 +227,9 @@ export class WaxSystem {
       this.positions[3 * i + 2] = r * Math.sin(a);
     }
     this.velocities.fill(0);
+    this.temperatures.fill(0);
+    this.densities.fill(this.params.restDensity);
+    this.molten.fill(0);
     this.previousStepPositions.set(this.positions);
   }
 
@@ -154,9 +260,9 @@ export class WaxSystem {
       const y = positions[3 * i + 1]!;
       const z = positions[3 * i + 2]!;
       const R = Math.max(1e-3, container.innerRadius(clamp(y, container.yMin, container.yMax)));
-      const radial = Math.max(0, 1 - Math.sqrt(x * x + z * z) / (0.6 * R));
+      const radial = Math.max(0, 1 - Math.sqrt(x * x + z * z) / (this.params.impulseWidth * R));
       const vertical = Math.min(1, (y - yLow) * invSpan);
-      velocities[3 * i + 1]! += s * radial * radial * vertical;
+      velocities[3 * i + 1]! += s * radial * radial * vertical * vertical;
     }
   }
 
@@ -171,20 +277,62 @@ export class WaxSystem {
   private substep(dt: number): void {
     this.applyExternalForces(dt);
     this.findNeighbors();
-    this.applyViscosity(dt);
+    this.applyViscosityAndConduction(dt);
+    this.applyHeatExchange(dt);
     this.predict(dt);
     this.relaxDoubleDensity(dt);
     this.resolveCollisionsAndVelocities(dt);
   }
 
   private applyExternalForces(dt: number): void {
-    const { velocities, count } = this;
-    const dvy = -this.params.gravity * dt;
-    const damp = Math.max(0, 1 - this.params.drag * dt);
+    const { velocities, temperatures, molten, count } = this;
+    const { gravity, buoyancy, buoyancyMax, neutralTemperature, meltHysteresis, drag } = this.params;
+    const damp = Math.max(0, 1 - drag * dt);
+    const saturate = Number.isFinite(buoyancyMax) && buoyancyMax > 0;
+    const half = 0.5 * Math.max(0, meltHysteresis);
     for (let i = 0; i < count; i++) {
+      const t = temperatures[i]!;
+      if (t > neutralTemperature + half) molten[i] = 1;
+      else if (t < neutralTemperature - half) molten[i] = 0;
+      const tn = molten[i] ? neutralTemperature - half : neutralTemperature + half;
+      const linear = buoyancy * (t - tn);
+      const lift = saturate ? buoyancyMax * Math.tanh(linear / buoyancyMax) : linear;
+      const ay = lift - gravity;
       velocities[3 * i]! *= damp;
-      velocities[3 * i + 1] = (velocities[3 * i + 1]! + dvy) * damp;
+      velocities[3 * i + 1] = (velocities[3 * i + 1]! + ay * dt) * damp;
       velocities[3 * i + 2]! *= damp;
+    }
+  }
+
+  /** Chauffe par le fond, refroidissement vers le liquide (pondéré par l'exposition). */
+  private applyHeatExchange(dt: number): void {
+    const { positions, temperatures: T, densities, count, container } = this;
+    const { heatRate, heatFalloff, heatRadius, coolRate, coolTopBoost, coolTopExponent, wallCooling, interiorCooling, restDensity } =
+      this.params;
+    const invRadius2 = 1 / Math.max(1e-6, heatRadius * heatRadius);
+    if (heatRate === 0 && coolRate === 0) return;
+    const invFalloff = 1 / Math.max(1e-3, heatFalloff);
+    const invHeight = 1 / (container.yMax - container.yMin);
+    const invRest = 1 / Math.max(1e-6, restDensity);
+    for (let i = 0; i < count; i++) {
+      const above = Math.max(0, positions[3 * i + 1]! - container.yMin);
+      const hn = Math.min(1, above * invHeight);
+      const exposure = clamp(1 - densities[i]! * invRest, 0, 1);
+      const shield = interiorCooling + (1 - interiorCooling) * exposure;
+      const px = positions[3 * i]!;
+      const pz = positions[3 * i + 2]!;
+      const r2 = px * px + pz * pz;
+      const heat = heatRate * Math.exp(-above * invFalloff - r2 * invRadius2);
+      let wall = 0;
+      if (wallCooling > 0) {
+        const R = container.innerRadius(clamp(positions[3 * i + 1]!, container.yMin, container.yMax));
+        const u = R > 1e-6 ? r2 / (R * R) : 1;
+        wall = wallCooling * u * u;
+      }
+      const cool = coolRate * (1 + coolTopBoost * Math.pow(hn, coolTopExponent) + wall) * shield;
+      const t = T[i]!;
+      // Implicite par rapport aux taux : reste dans [0, 1] quel que soit dt.
+      T[i] = clamp((t + dt * heat) / (1 + dt * (heat + cool)), 0, 1);
     }
   }
 
@@ -207,9 +355,14 @@ export class WaxSystem {
     }
   }
 
-  /** Impulsions radiales entre paires qui se rapprochent (algorithme 5 du papier). */
-  private applyViscosity(dt: number): void {
-    const { positions: x, velocities: v, count, neighbors, neighborCount } = this;
+  /**
+   * Impulsions radiales entre paires qui se rapprochent (algorithme 5 du papier),
+   * et conduction thermique sur les mêmes paires (une seule passe de distances).
+   */
+  private applyViscosityAndConduction(dt: number): void {
+    const { positions: x, velocities: v, temperatures: T, count, neighbors, neighborCount } = this;
+    // Borné pour la stabilité : Σ voisins ≈ ρ0, l'échange reste < 1/2 par pas.
+    const kappa = Math.min(this.params.conductivity * dt, 0.5 / Math.max(1, this.params.restDensity));
     const h = this.params.interactionRadius;
     const invH = 1 / h;
     const sigma = this.params.viscosityLinear;
@@ -227,6 +380,12 @@ export class WaxSystem {
         const r = Math.sqrt(rx * rx + ry * ry + rz * rz);
         const q = r * invH;
         if (q >= 1 || r < 1e-9) continue;
+        if (kappa > 0) {
+          const w = 1 - q;
+          const flux = kappa * w * w * (T[j]! - T[i]!);
+          T[i]! += flux;
+          T[j]! -= flux;
+        }
         rx /= r;
         ry /= r;
         rz /= r;
@@ -258,8 +417,8 @@ export class WaxSystem {
 
   /** Algorithme 2 du papier, en Gauss-Seidel (déplacements appliqués au fil de l'eau). */
   private relaxDoubleDensity(dt: number): void {
-    const { positions: x, count, neighbors, neighborCount } = this;
-    const { interactionRadius: h, restDensity, stiffness, nearStiffness } = this.params;
+    const { positions: x, densities, count, neighbors, neighborCount } = this;
+    const { interactionRadius: h, restDensity, stiffness, nearStiffness, cohesion } = this.params;
     const invH = 1 / h;
     const dt2 = dt * dt;
 
@@ -284,7 +443,9 @@ export class WaxSystem {
         nearDensity += w * w * w;
       }
 
-      const pressure = stiffness * (density - restDensity);
+      densities[i] = density;
+      let pressure = stiffness * (density - restDensity);
+      if (pressure < 0) pressure *= cohesion;
       const nearPressure = nearStiffness * nearDensity;
 
       let dix = 0;

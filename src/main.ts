@@ -1,9 +1,9 @@
-import { LampProfile, Simulation } from './sim';
+import { LampProfile, SIM_FIXED_DT, Simulation, WAX_PRESETS, DEFAULT_WAX_PARAMS, type PresetName } from './sim';
 import { Stage } from './render';
 import { createDebugPanel, type LoopStats } from './ui';
 
 /** Pas fixe de la physique (s). Indépendant du framerate d'affichage. */
-const FIXED_DT = 1 / 120;
+const FIXED_DT = SIM_FIXED_DT;
 /** Au-delà, on considère que l'onglet a été suspendu : on ne rattrape pas. */
 const MAX_FRAME_DT = 0.1;
 /** Garde-fou contre la spirale de la mort si un step devient trop coûteux. */
@@ -25,6 +25,10 @@ const gui = createDebugPanel({
   waxView: stage.waxDebug.params,
   reset: () => sim.reset(),
   impulse: () => sim.impulse(),
+  applyPreset: (name: PresetName) => {
+    Object.assign(sim.wax.params, DEFAULT_WAX_PARAMS, WAX_PRESETS[name]);
+    sim.reset();
+  },
 });
 
 let accumulator = 0;

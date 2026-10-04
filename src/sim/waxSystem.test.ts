@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { LampProfile } from './lampProfile';
+import { SIM_FIXED_DT } from './presets';
 import { Simulation } from './simulation';
+import { NO_THERMAL_PARAMS } from './waxSystem';
 
-const DT = 1 / 120;
+const DT = SIM_FIXED_DT;
 
 function run(sim: Simulation, seconds: number): void {
   const steps = Math.round(seconds / DT);
@@ -48,7 +50,7 @@ function stats(sim: Simulation) {
 
 describe('WaxSystem (Clavet 2005)', () => {
   it('forme au fond une masse compacte et calme, puis s\'étire, se scinde et refusionne après une impulsion', () => {
-    const sim = new Simulation(new LampProfile());
+    const sim = new Simulation(new LampProfile(), NO_THERMAL_PARAMS);
     run(sim, 10);
 
     const rest = stats(sim);
@@ -59,19 +61,48 @@ describe('WaxSystem (Clavet 2005)', () => {
 
     sim.impulse();
     let maxTop = 0;
-    let maxBlobs = 1;
+    let biggestDrop = 0;
     for (let t = 0; t < 4; t += 0.25) {
       run(sim, 0.25);
       maxTop = Math.max(maxTop, stats(sim).yTop);
-      maxBlobs = Math.max(maxBlobs, clusters(sim).filter((s) => s >= 5).length);
+      biggestDrop = Math.max(biggestDrop, clusters(sim)[1] ?? 0);
     }
     expect(maxTop).toBeGreaterThan(sim.container.yMin + 1.2);
-    expect(maxBlobs).toBeGreaterThanOrEqual(2);
+    // Une goutte d'au moins 30 particules se détache de la masse.
+    expect(biggestDrop).toBeGreaterThanOrEqual(30);
 
     run(sim, 8);
     const after = stats(sim);
     expect(after.outside).toBe(0);
     expect(after.rmsSpeed).toBeLessThan(0.02);
     expect(clusters(sim)[0]).toBeGreaterThanOrEqual(sim.wax.count - 2);
-  }, 30_000);
+  }, 60_000);
+
+  it('cycle thermique (preset par défaut) : la cire monte, redescend, le réservoir reste', () => {
+    const sim = new Simulation(new LampProfile());
+    const { yMin, yMax } = sim.container;
+    const H = yMax - yMin;
+    let reachedHigh = 0;
+    let minReservoir = 1;
+    let maxReservoir = 0;
+    for (let t = 0; t < 150; t += 5) {
+      run(sim, 5);
+      const { positions: x, temperatures: T, count: n } = sim.wax;
+      let bottom = 0;
+      for (let i = 0; i < n; i++) {
+        expect(T[i]).toBeGreaterThanOrEqual(0);
+        expect(T[i]).toBeLessThanOrEqual(1);
+        const y = x[3 * i + 1]!;
+        if (y < yMin + 0.2 * H) bottom++;
+        if (y > yMin + 0.6 * H) reachedHigh++;
+      }
+      if (t >= 60) {
+        minReservoir = Math.min(minReservoir, bottom / n);
+        maxReservoir = Math.max(maxReservoir, bottom / n);
+      }
+    }
+    expect(reachedHigh).toBeGreaterThan(0); // de la cire a atteint le haut
+    expect(minReservoir).toBeGreaterThan(0.2); // le réservoir ne se vide jamais
+    expect(maxReservoir).toBeGreaterThan(minReservoir + 0.15); // et ça bouge : pas d'état figé
+  }, 120_000);
 });

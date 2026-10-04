@@ -22,6 +22,8 @@ npm run dev        # serveur de dev
 npm run build      # typecheck (tsc --noEmit) + build Vite
 npm run typecheck
 npm test           # vitest (src/**/*.test.ts)
+npm run bench -- [--preset calme] [--seconds 300] [--set clé=valeur ...] [--sections 10]
+                   # banc headless : métriques du cycle thermique (+ coupes ASCII)
 ```
 
 ## Architecture
@@ -33,6 +35,7 @@ src/
     simulation.ts        Orchestration : step(dt) à pas fixe, reset, impulse.
     waxSystem.ts         Cire : particules en TypedArrays, solveur Clavet 2005.
     spatialHashGrid.ts   Grille de hachage spatial uniforme (voisinage).
+    presets.ts           SIM_FIXED_DT + presets thermiques (équilibré, calme, agité).
     random.ts            PRNG seedé (mulberry32).
     *.test.ts            Tests vitest (grille vs force brute, stabilité de la cire).
   render/   Tout ce qui touche Three.js : scène, caméra, matériaux, shaders.
@@ -41,6 +44,8 @@ src/
     waxDebugView.ts  InstancedMesh de sphères (debug), interpolé entre deux pas fixes.
   ui/       Panneau lil-gui (debug). Ne contient pas de logique métier.
   main.ts   Assemblage + boucle (accumulateur à pas fixe).
+scripts/
+  bench.ts  Banc headless (tsx) : répartition par hauteur, amas, vitesses, trajets.
 ```
 
 Sens des dépendances : `main → render → sim`, `main → ui`, `main → sim`. Jamais `sim → render/ui`.
@@ -61,7 +66,8 @@ Unités : **1 unité = 10 cm**, Y vers le haut, sol en y = 0, axe de la lampe en
 
 ### Boucle (src/main.ts)
 
-- Physique à **pas fixe** `FIXED_DT = 1/120 s` via un accumulateur, découplé du framerate.
+- Physique à **pas fixe** `SIM_FIXED_DT = 1/60 s` (× 2 sous-pas) via un accumulateur, découplé
+  du framerate. 1/120 coûtait ~7 ms/frame à 800 particules ; à 1/60, ~3 ms et c'est stable.
 - `frameDt` borné à 0.1 s (onglet suspendu), au plus 8 steps par frame ; au-delà on
   jette le retard (pas de spirale de la mort).
 - `sim.params.timeScale` et `sim.params.paused` agissent sur l'accumulateur.
@@ -77,17 +83,54 @@ gravité + traînée linéaire → voisinage (grille) → viscosité par impulsi
 → double density relaxation (Gauss-Seidel) → collisions (fond, plafond, paroi
 `innerRadius(y)` avec normale tenant compte de la pente, friction de Coulomb) → v = Δx/dt.
 
-Réglages par défaut (validés par `waxSystem.test.ts`) : h = 0.13, ρ0 = 3 (~30 voisins),
-k = 40, k near = 160, σ = 60, β = 20, gravité apparente 0.8, traînée 0.6, μ = 0.3.
-Leçons du réglage :
-- `k` élevé (≥ 100 avec ρ0 = 7) → la masse « bout » en permanence : le déplacement est
-  en dt²·k·Δρ sommé sur ~N voisins, il doit rester petit devant h.
+Mise à l'échelle 400 → 800 particules à volume constant : h ∝ N^(−1/3) (0.13 → 0.103),
+k et k near × 0.8, rayon de collision et taille des sphères idem.
+
+Leçons du réglage mécanique :
+- `k` élevé (≥ 100 avec ρ0 = 7) → la masse « bout » : le déplacement est en dt²·k·Δρ
+  sommé sur ~N voisins, il doit rester petit devant h.
 - Une friction appliquée comme facteur par sous-pas colle les particules au verre ;
   la friction de Coulomb (∝ vitesse normale annulée) est indépendante du dt.
 - L'impulsion doit avoir un gradient (haut et cœur rapides, base posée), sinon le bloc
-  décolle entier sans s'étirer. Hauteur de référence = moyenne + 1.5σ (robuste aux isolées).
+  décolle entier sans s'étirer.
 
-Coût mesuré : ~1.5–1.9 ms CPU par pas fixe pour 400 particules (2 pas par frame à 60 fps).
+### Thermique (étape 3)
+
+T ∈ [0, 1] par particule. Chauffe gaussienne au centre du fond (contact seulement),
+refroidissement fort en haut (profil hauteur^8) et contre le verre, atténué au cœur des
+blobs (exposition estimée par la densité), conduction entre voisins sur les paires de la
+viscosité. Flottabilité ∝ (T − Tn), avec **hystérésis de fusion** : Tn − δ/2 pour une
+particule fondue, Tn + δ/2 pour une figée.
+
+Démarche (≈ 60 configurations au banc, voir `npm run bench`) et pourquoi chaque ingrédient
+existe — **ne pas les retirer sans repasser au banc** :
+1. Forces faibles (flottabilité ~1) → tout reste figé : le fluide de Clavet a un seuil
+   d'écoulement. Il faut des forces fortes (buoyancy 40) **et** une traînée forte (60)
+   pour garder ~0.1 u/s.
+2. Taux thermiques ~1/s → chaque particule prend la température d'équilibre de sa
+   hauteur → strates immobiles. Il faut de l'inertie thermique (refroidissement
+   ~0.01/s hors du haut) pour qu'une goutte garde sa chaleur pendant la montée.
+3. Chauffe qui décroît en douceur avec la hauteur → attracteur « boule qui flotte » à
+   l'altitude où chauffe = refroidissement. Chauffe au contact seulement (falloff 0.06).
+4. Même ainsi, sans hystérésis : convection stationnaire (pilier immobile) ou réservoir
+   posé à T = Tn. L'hystérésis de fusion (δ = 0.3) transforme ça en oscillateur de
+   relaxation : c'est elle qui crée le cycle.
+5. Cohésion pleine (1) → la tige aspire tout le réservoir et la masse monte d'un bloc.
+   cohesion = 0.5 laisse les gouttes se détacher.
+
+Résultats au banc (5 min simulées, graine 1) :
+
+| preset    | réservoir (bas 20 %) min / moy | montée médiane | stagnation / collé en haut |
+|-----------|--------------------------------|----------------|----------------------------|
+| équilibré | 37 % / 58 %                    | 17 s           | 0 / 0                      |
+| calme     | 46 % / 78 %                    | (rare > 75 %)  | 0 / 0                      |
+| agité     | 39 % / 57 %                    | 7 s            | 0 / 0                      |
+
+Limites connues : les gouttes détachées sont souvent grosses (~400 particules, la moitié
+de la cire) avec quelques petites (10–40) ; les têtes s'aplatissent vers 65–75 % de la
+hauteur plutôt que sous le capuchon.
+
+Coût mesuré : ~3 ms CPU par pas fixe (800 particules), 1 pas par frame à 60 fps.
 
 ## Conventions
 
@@ -105,7 +148,7 @@ Coût mesuré : ~1.5–1.9 ms CPU par pas fixe pour 400 particules (2 pas par fr
 
 1. ✅ Fondations : projet, profil de lampe, scène, contrôles, boucle à pas fixe.
 2. ✅ Particules Clavet 2005 : cohésion, viscosité, collisions, grille spatiale, rendu debug.
-3. Thermique : chauffe par l'ampoule, refroidissement en haut, flottabilité fonction de T.
+3. ✅ Thermique : cycle chauffe/montée/refroidissement/descente, presets, banc headless.
 4. Rendu raymarching du champ de densité dans le volume du verre (bornage par le profil).
 5. Matériaux : verre réfractif, liquide teinté, cire émissive/subsurface, glow de l'ampoule.
 6. Perf : profiling, résolution du raymarch adaptative, budget 60 fps.
