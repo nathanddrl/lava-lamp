@@ -207,6 +207,9 @@ export const NO_THERMAL_PARAMS: Partial<WaxParams> = {
 };
 
 export const MAX_PARTICLES = 4000;
+
+/** Disposition initiale des particules, cf. `WaxSystem.reset`. */
+export type WaxLayout = 'cloud' | 'settled';
 /** Voisins mémorisés par particule ; au-delà, les plus lointains sont ignorés. */
 const MAX_NEIGHBORS = 128;
 
@@ -240,8 +243,12 @@ export class WaxSystem {
     this.reset();
   }
 
-  /** (Ré)alloue les buffers et redistribue les particules en l'air, au centre du récipient. */
-  reset(): void {
+  /**
+   * (Ré)alloue les buffers et replace les particules :
+   *  - `cloud` : nuage lâche en l'air, au centre du récipient (on voit la masse tomber) ;
+   *  - `settled` : cire froide tassée au fond, comme une lampe éteinte (allumage).
+   */
+  reset(layout: WaxLayout = 'cloud'): void {
     const n = Math.max(1, Math.min(MAX_PARTICLES, Math.round(this.params.particleCount)));
     if (n !== this.count || this.positions.length !== 3 * n) {
       this.positions = new Float32Array(3 * n);
@@ -258,8 +265,21 @@ export class WaxSystem {
     }
     this.count = n;
 
-    // Nuage cylindrique lâche, assez haut pour qu'on voie la masse tomber.
     const rand = mulberry32(this.params.seed);
+    if (layout === 'settled') this.placeSettled(rand);
+    else this.placeCloud(rand);
+
+    this.velocities.fill(0);
+    this.temperatures.fill(0);
+    this.densities.fill(this.params.restDensity);
+    this.molten.fill(0);
+    this.meltTimer.fill(0);
+    this.previousStepPositions.set(this.positions);
+  }
+
+  /** Nuage cylindrique lâche, assez haut pour qu'on voie la masse tomber. */
+  private placeCloud(rand: () => number): void {
+    const n = this.count;
     const { yMin, yMax } = this.container;
     const yCenter = yMin + 0.55 * (yMax - yMin);
     const cloudRadius = 0.6 * this.container.innerRadius(yCenter);
@@ -272,12 +292,36 @@ export class WaxSystem {
       this.positions[3 * i + 1] = yCenter + (rand() - 0.5) * height;
       this.positions[3 * i + 2] = r * Math.sin(a);
     }
-    this.velocities.fill(0);
-    this.temperatures.fill(0);
-    this.densities.fill(this.params.restDensity);
-    this.molten.fill(0);
-    this.meltTimer.fill(0);
-    this.previousStepPositions.set(this.positions);
+  }
+
+  /**
+   * Couches tassées au fond, au pas de repos (≈ h/2), dans le rayon intérieur moins le
+   * rayon de collision ; léger bruit pour casser le réseau.
+   */
+  private placeSettled(rand: () => number): void {
+    const n = this.count;
+    const { yMin, yMax } = this.container;
+    const spacing = 0.5 * this.params.interactionRadius;
+    const margin = this.params.particleRadius + 0.25 * spacing;
+    let placed = 0;
+    for (let layer = 0; placed < n; layer++) {
+      const y = yMin + this.params.particleRadius + (layer + 0.5) * spacing;
+      if (y > yMax) break;
+      const R = this.container.innerRadius(y) - margin;
+      // Couches décalées d'un demi-pas (empilement compact).
+      const shift = (layer % 2) * 0.5 * spacing;
+      for (let gx = -R; gx <= R && placed < n; gx += spacing) {
+        for (let gz = -R; gz <= R && placed < n; gz += spacing) {
+          const x = gx + shift + (rand() - 0.5) * 0.2 * spacing;
+          const z = gz + shift + (rand() - 0.5) * 0.2 * spacing;
+          if (x * x + z * z > R * R) continue;
+          this.positions[3 * placed] = x;
+          this.positions[3 * placed + 1] = y + (rand() - 0.5) * 0.2 * spacing;
+          this.positions[3 * placed + 2] = z;
+          placed++;
+        }
+      }
+    }
   }
 
   /**

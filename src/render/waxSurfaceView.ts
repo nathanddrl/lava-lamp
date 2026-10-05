@@ -4,8 +4,7 @@ import type { WaxSystem } from '../sim/waxSystem';
 import { DensityField, OCCUPANCY_BLOCK, clavetReferenceDensity } from './densityField';
 import volumeVert from './shaders/volume.vert.glsl?raw';
 import volumeCommon from './shaders/volumeCommon.glsl?raw';
-import waxFrag from './shaders/wax.frag.glsl?raw';
-import liquidFrag from './shaders/liquid.frag.glsl?raw';
+import volumeFrag from './shaders/volume.frag.glsl?raw';
 
 const RADIUS_LUT_SIZE = 256;
 const RADIAL_SEGMENTS = 64;
@@ -18,13 +17,17 @@ export interface WaxSurfaceParams {
   threshold: number;
   /** Nombre maximal de pas du raymarch de la cire. */
   steps: number;
-  liquidSteps: number;
+  /** Indice de réfraction du liquide (lentille cylindrique). 1 = pas de réfraction. */
+  ior: number;
   waxColor: string;
   waxHotColor: string;
   waxDeepColor: string;
   liquidColor: string;
-  /** Densité optique du liquide (1/unité). */
+  bulbColor: string;
+  /** Densité optique du liquide (1/unité) : teinte de ce qu'on voit à travers. */
   liquidDensity: number;
+  /** Diffusion du liquide (1/unité) : à quel point il s'illumine sous l'ampoule. */
+  liquidGlow: number;
   bulbIntensity: number;
   subsurface: number;
   thicknessScale: number;
@@ -38,40 +41,48 @@ export const DEFAULT_WAX_SURFACE_PARAMS: WaxSurfaceParams = {
   liquidVisible: true,
   threshold: 0.5,
   steps: 96,
-  liquidSteps: 24,
+  ior: 1.38,
+  // Couleurs : écrasées par le thème (src/render/themes.ts).
   waxColor: '#d8381c',
   waxHotColor: '#ff7a1e',
   waxDeepColor: '#ff5a1a',
   liquidColor: '#ffb347',
-  liquidDensity: 0.35,
-  bulbIntensity: 2.2,
-  subsurface: 0.9,
+  bulbColor: '#ffb070',
+  liquidDensity: 0.45,
+  liquidGlow: 0.5,
+  bulbIntensity: 2.6,
+  subsurface: 1.1,
   thicknessScale: 9,
-  emission: 0.35,
+  emission: 0.55,
   wrap: 0.6,
   fresnel: 0.35,
 };
 
 /**
- * Surface de la cire : champ de densité splatté sur CPU (DensityField), uploadé en
- * texture 3D, raymarché dans le volume intérieur du verre.
+ * Surface de la cire et liquide : champ de densité splatté sur CPU (DensityField),
+ * uploadé en texture 3D, raymarché dans le volume intérieur du verre.
  *
- *  - `waxMesh` (passe opaque) : faces arrière du volume intérieur ; le fragment
- *    cherche l'isosurface, écrit couleur + gl_FragDepth, ou se défausse.
- *  - `liquidMesh` (passe transparente, avant le verre) : mêmes faces arrière, teinte
- *    du liquide accumulée le long du rayon ; masqué par la profondeur de la cire.
+ * Un seul mesh (`volumeMesh`) : faces avant du volume intérieur fermé. Le fragment
+ * réfracte le rayon à l'entrée, cherche l'isosurface en accumulant le liquide, puis
+ * écrit soit la cire (opaque, gl_FragDepth au point touché), soit le liquide seul
+ * (prémultiplié, profondeur de la face d'entrée). Passe transparente, entre la face
+ * arrière du verre et sa face avant (voir lamp.ts).
+ *
+ * La réfraction est faite ici plutôt que par la transmission de MeshPhysicalMaterial :
+ * celle-ci re-rend tous les objets opaques dans une cible MSAA séparée, ce qui ferait
+ * calculer le raymarch deux fois par frame.
  */
 export class WaxSurfaceView {
   readonly params: WaxSurfaceParams = { ...DEFAULT_WAX_SURFACE_PARAMS };
   readonly field: DensityField;
-  readonly waxMesh: THREE.Mesh;
-  readonly liquidMesh: THREE.Mesh;
+  readonly volumeMesh: THREE.Mesh;
+  /** Puissance de la lampe (0 = éteinte, 1 = régime) : pilotée par l'allumage. */
+  power = 1;
   /** Temps CPU moyen du splatting + préparation de l'upload (ms). */
   splatMs = 0;
 
   private readonly geometry: THREE.LatheGeometry;
-  private readonly waxMaterial: THREE.ShaderMaterial;
-  private readonly liquidMaterial: THREE.ShaderMaterial;
+  private readonly material: THREE.ShaderMaterial;
   private readonly radiusLut: THREE.DataTexture;
   private texture: THREE.Data3DTexture | null = null;
   private occupancyTexture: THREE.Data3DTexture | null = null;
@@ -126,7 +137,8 @@ export class WaxSurfaceView {
       uBlockSize: { value: 0 },
       uThreshold: { value: 0 },
       uSteps: { value: 0 },
-      uLiquidSteps: { value: 0 },
+      uWaxVisible: { value: true },
+      uIor: { value: 1 },
       uRadiusLut: { value: this.radiusLut },
       uYMin: { value: profile.yMin },
       uYMax: { value: profile.yMax },
@@ -134,19 +146,22 @@ export class WaxSurfaceView {
       uWallSoftness: { value: 0.025 },
       uLiquidAbsorption: { value: new THREE.Vector3() },
       uLiquidScatter: { value: new THREE.Color() },
+      uLiquidGlow: { value: 0 },
       // L'ampoule est dans le socle, sous le fond du verre.
       uBulbPosition: { value: new THREE.Vector3(0, profile.glassBottom - 0.12, 0) },
-      uBulbColor: { value: new THREE.Color(1.0, 0.62, 0.3) },
+      uBulbColor: { value: new THREE.Color() },
       uBulbIntensity: { value: 0 },
+      uPower: { value: 1 },
       uLiquidGlowHeight: { value: 0.6 },
-      uAmbientColor: { value: new THREE.Color(0.05, 0.05, 0.07) },
+      // Pièce sombre : presque rien hors de l'ampoule.
+      uAmbientColor: { value: new THREE.Color(0.02, 0.02, 0.03) },
       uWaxColor: { value: new THREE.Color() },
       uWaxHotColor: { value: new THREE.Color() },
       uWaxDeepColor: { value: new THREE.Color() },
       uKeyDirection: { value: key },
-      uKeyColor: { value: new THREE.Color(0.55, 0.53, 0.5) },
+      uKeyColor: { value: new THREE.Color(0.18, 0.18, 0.2) },
       uRimDirection: { value: rim },
-      uRimColor: { value: new THREE.Color(0.12, 0.14, 0.3) },
+      uRimColor: { value: new THREE.Color(0.05, 0.06, 0.14) },
       uWrap: { value: 0 },
       uSubsurface: { value: 0 },
       uThicknessScale: { value: 0 },
@@ -155,66 +170,67 @@ export class WaxSurfaceView {
       uFresnel: { value: 0 },
     };
 
-    this.waxMaterial = new THREE.ShaderMaterial({
-      name: 'wax-surface',
+    this.material = new THREE.ShaderMaterial({
+      name: 'wax-liquid-volume',
       uniforms: this.uniforms,
       vertexShader: volumeVert,
-      fragmentShader: `${volumeCommon}\n${waxFrag}`,
-      side: THREE.BackSide,
-    });
-    this.waxMesh = new THREE.Mesh(this.geometry, this.waxMaterial);
-    this.waxMesh.name = 'wax-surface';
-
-    this.liquidMaterial = new THREE.ShaderMaterial({
-      name: 'liquid',
-      uniforms: this.uniforms,
-      vertexShader: volumeVert,
-      fragmentShader: `${volumeCommon}\n${liquidFrag}`,
-      side: THREE.BackSide,
+      fragmentShader: `${volumeCommon}\n${volumeFrag}`,
+      side: THREE.FrontSide,
       transparent: true,
-      depthWrite: false,
+      depthWrite: true,
       premultipliedAlpha: true,
       blending: THREE.CustomBlending,
       blendSrc: THREE.OneFactor,
       blendDst: THREE.OneMinusSrcAlphaFactor,
+      blendSrcAlpha: THREE.OneFactor,
+      blendDstAlpha: THREE.OneMinusSrcAlphaFactor,
     });
-    this.liquidMesh = new THREE.Mesh(this.geometry, this.liquidMaterial);
-    this.liquidMesh.name = 'liquid';
-    // Après les opaques (la cire a écrit sa profondeur), avant le verre (renderOrder 10).
-    this.liquidMesh.renderOrder = 5;
+    this.volumeMesh = new THREE.Mesh(this.geometry, this.material);
+    this.volumeMesh.name = 'wax-liquid-volume';
+    // Entre la face arrière du verre (renderOrder 1) et sa face avant (3).
+    this.volumeMesh.renderOrder = 2;
   }
 
   /** Splatte les particules (interpolées) dans le champ et prépare l'upload. */
   update(wax: WaxSystem, alpha: number, frameDt: number): void {
     const p = this.params;
-    this.waxMesh.visible = p.visible;
-    this.liquidMesh.visible = p.liquidVisible;
-    if (!p.visible) return;
-
-    const t0 = performance.now();
-    const field = this.field;
-    field.update(wax.positions, wax.previousStepPositions, wax.temperatures, wax.count, alpha, frameDt);
-    if (field.version !== this.textureVersion) this.recreateTexture();
-    this.texture!.needsUpdate = true;
-    this.occupancyTexture!.needsUpdate = true;
-    const ms = performance.now() - t0;
-    this.splatMs += (ms - this.splatMs) * 0.05;
-
+    this.volumeMesh.visible = p.visible || p.liquidVisible;
+    if (!this.volumeMesh.visible) return;
     const u = this.uniforms;
+
+    if (p.visible) {
+      const t0 = performance.now();
+      const field = this.field;
+      field.update(wax.positions, wax.previousStepPositions, wax.temperatures, wax.count, alpha, frameDt);
+      if (field.version !== this.textureVersion) this.recreateTexture();
+      this.texture!.needsUpdate = true;
+      this.occupancyTexture!.needsUpdate = true;
+      const ms = performance.now() - t0;
+      this.splatMs += (ms - this.splatMs) * 0.05;
+    } else if (!this.texture) {
+      this.recreateTexture();
+    }
+
+    u.uWaxVisible!.value = p.visible;
     u.uThreshold!.value = p.threshold;
     u.uSteps!.value = Math.round(p.steps);
-    u.uLiquidSteps!.value = Math.round(p.liquidSteps);
+    u.uIor!.value = Math.max(1, p.ior);
+    u.uPower!.value = this.power;
+    (u.uBulbColor!.value as THREE.Color).set(p.bulbColor);
     (u.uWaxColor!.value as THREE.Color).set(p.waxColor);
     (u.uWaxHotColor!.value as THREE.Color).set(p.waxHotColor);
     (u.uWaxDeepColor!.value as THREE.Color).set(p.waxDeepColor);
     const liquid = u.uLiquidScatter!.value as THREE.Color;
     liquid.set(p.liquidColor);
+    if (!p.liquidVisible) liquid.setRGB(0, 0, 0);
     // Le liquide absorbe le complémentaire de sa couleur : il teinte ce qu'on voit à travers.
+    const density = p.liquidVisible ? p.liquidDensity : 0;
     (u.uLiquidAbsorption!.value as THREE.Vector3).set(
-      p.liquidDensity * (0.15 + 1 - liquid.r),
-      p.liquidDensity * (0.15 + 1 - liquid.g),
-      p.liquidDensity * (0.15 + 1 - liquid.b),
+      density * (0.15 + 1 - liquid.r),
+      density * (0.15 + 1 - liquid.g),
+      density * (0.15 + 1 - liquid.b),
     );
+    u.uLiquidGlow!.value = p.liquidVisible ? p.liquidGlow : 0;
     u.uBulbIntensity!.value = p.bulbIntensity;
     u.uSubsurface!.value = p.subsurface;
     u.uThicknessScale!.value = p.thicknessScale;
@@ -265,7 +281,6 @@ export class WaxSurfaceView {
     this.occupancyTexture?.dispose();
     this.radiusLut.dispose();
     this.geometry.dispose();
-    this.waxMaterial.dispose();
-    this.liquidMaterial.dispose();
+    this.material.dispose();
   }
 }

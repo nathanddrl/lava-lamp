@@ -1,0 +1,222 @@
+/* Barre de contrôle finale : discrète, en bas, se retire quand on ne s'en sert pas. */
+
+.lava-bar {
+  --bar-bg: rgba(14, 11, 16, 0.55);
+  --bar-border: rgba(255, 255, 255, 0.08);
+  --bar-fg: rgba(255, 244, 235, 0.86);
+  --bar-dim: rgba(255, 244, 235, 0.5);
+  --bar-accent: rgba(255, 210, 170, 0.95);
+
+  position: fixed;
+  left: 50%;
+  bottom: max(16px, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100vw - 32px);
+  padding: 6px;
+  border-radius: 999px;
+  background: var(--bar-bg);
+  border: 1px solid var(--bar-border);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  color: var(--bar-fg);
+  font: 500 13px/1 system-ui, -apple-system, 'Segoe UI', sans-serif;
+  letter-spacing: 0.01em;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: opacity 0.6s ease, transform 0.6s ease;
+  z-index: 10;
+}
+
+.lava-bar.is-hidden {
+  opacity: 0;
+  transform: translateX(-50%) translateY(10px);
+  pointer-events: none;
+}
+
+.lava-bar__group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.lava-bar__sep {
+  width: 1px;
+  height: 22px;
+  margin: 0 4px;
+  background: var(--bar-border);
+}
+
+.lava-bar button {
+  appearance: none;
+  border: 0;
+  margin: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  border-radius: 999px;
+  min-width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s ease, color 0.2s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.lava-bar button:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.lava-bar button:focus-visible {
+  outline: 2px solid var(--bar-accent);
+  outline-offset: 1px;
+}
+
+/* Pastilles de thème : la cire sur son liquide. */
+.lava-bar__swatch {
+  width: 36px;
+  padding: 0;
+}
+
+.lava-bar__swatch span {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 62%, var(--wax) 0 38%, var(--liquid) 42% 100%);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.lava-bar__swatch[aria-pressed='true'] span {
+  transform: scale(1.12);
+  box-shadow: 0 0 0 2px var(--bar-accent), 0 0 12px var(--wax);
+}
+
+.lava-bar__mode {
+  padding: 0 12px;
+  color: var(--bar-dim);
+}
+
+.lava-bar__mode[aria-pressed='true'] {
+  color: var(--bar-fg);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.lava-bar svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Écrans étroits : on garde tout, mais plus serré (les modes en initiales). */
+@media (max-width: 520px) {
+  .lava-bar {
+    gap: 0;
+    padding: 4px;
+  }
+  .lava-bar__group {
+    gap: 0;
+  }
+  .lava-bar button {
+    min-width: 32px;
+    height: 40px;
+  }
+  .lava-bar__swatch {
+    width: 30px;
+    min-width: 30px;
+  }
+  .lava-bar__mode {
+    padding: 0 6px;
+  }
+  .lava-bar__mode .lava-bar__long {
+    display: none;
+  }
+  .lava-bar__sep {
+    margin: 0 2px;
+  }
+}
+
+/* Très petits écrans (320 px) : séparateurs retirés, cibles un peu plus étroites. */
+@media (max-width: 359px) {
+  .lava-bar__sep {
+    display: none;
+  }
+  .lava-bar button {
+    min-width: 30px;
+  }
+  .lava-bar__swatch {
+    width: 28px;
+    min-width: 28px;
+  }
+  .lava-bar__mode {
+    padding: 0 4px;
+  }
+}
+
+@media (min-width: 521px) {
+  .lava-bar__mode .lava-bar__short {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lava-bar,
+  .lava-bar button,
+  .lava-bar__swatch span {
+    transition: none;
+  }
+}
+
+/* Message d'erreur plein écran (WebGL2 absent, contexte perdu). */
+.lava-fatal {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #07060a;
+  color: rgba(255, 244, 235, 0.88);
+  font: 400 15px/1.55 system-ui, -apple-system, 'Segoe UI', sans-serif;
+  text-align: center;
+  z-index: 20;
+}
+
+.lava-fatal__box {
+  max-width: 420px;
+}
+
+.lava-fatal h1 {
+  margin: 0 0 12px;
+  font-size: 20px;
+  font-weight: 600;
+  color: #ffb070;
+}
+
+.lava-fatal p {
+  margin: 0 0 16px;
+  color: rgba(255, 244, 235, 0.65);
+}
+
+.lava-fatal button {
+  appearance: none;
+  border: 1px solid rgba(255, 176, 112, 0.5);
+  background: transparent;
+  color: #ffb070;
+  font: inherit;
+  padding: 8px 18px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+/* lil-gui masqué par défaut (touche D). */
+.lil-gui.lava-debug-hidden {
+  display: none;
+}

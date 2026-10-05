@@ -3,6 +3,10 @@ import type { SimulationParams } from '../sim/simulation';
 import { DEFAULT_PRESET, WAX_PRESETS, type PresetName } from '../sim/presets';
 import { MAX_PARTICLES, type WaxParams } from '../sim/waxSystem';
 import type { DensityFieldParams } from '../render/densityField';
+import type { GlassParams } from '../render/lamp';
+import type { PostParams } from '../render/postprocess';
+import type { AdaptiveQualityParams } from '../render/quality';
+import type { RoomParams } from '../render/stage';
 import type { WaxSurfaceParams } from '../render/waxSurfaceView';
 
 /** Compteurs mis à jour par la boucle et affichés en lecture seule. */
@@ -20,23 +24,30 @@ export interface LoopStats {
   renderCpuMs: number;
   /** Temps GPU de la frame, ms ('n/d' sans EXT_disjoint_timer_query_webgl2). */
   gpuMs: string;
+  /** Niveau de qualité adaptative courant (libellé). */
+  quality: string;
 }
 
 export interface DebugPanelTargets {
   simParams: SimulationParams;
   waxParams: WaxParams;
   stats: LoopStats;
-  glassMaterial: { opacity: number };
+  glass: GlassParams;
+  updateGlass: () => void;
+  room: RoomParams;
+  post: PostParams;
+  adaptive: AdaptiveQualityParams;
   waxView: { visible: boolean; sphereRadius: number };
   surface: WaxSurfaceParams;
   field: DensityFieldParams;
+  halo: { intensity: number; reach: number };
   reset: () => void;
   impulse: () => void;
   applyPreset: (name: PresetName) => void;
 }
 
 export function createDebugPanel(t: DebugPanelTargets): GUI {
-  const gui = new GUI({ title: 'Lava Lamp — debug' });
+  const gui = new GUI({ title: 'Lava Lamp — debug (D)' });
   const actions = { reset: t.reset, impulse: t.impulse, preset: DEFAULT_PRESET as PresetName };
 
   const sim = gui.addFolder('Simulation');
@@ -98,22 +109,23 @@ export function createDebugPanel(t: DebugPanelTargets): GUI {
   render.add(s, 'liquidVisible').name('liquide');
   render.add(t.waxView, 'visible').name('sphères debug');
   render.add(t.waxView, 'sphereRadius', 0.005, 0.12, 0.001).name('taille sphères');
-  render.add(t.glassMaterial, 'opacity', 0, 1, 0.01).name('opacité verre');
 
   const field = render.addFolder('Champ de densité');
   field.add(s, 'threshold', 0.05, 1.5, 0.01).name('seuil');
   field.add(t.field, 'kernelRadius', 0.03, 0.2, 0.005).name('rayon du noyau');
-  field.add(t.field, 'resolution', 24, 96, 4).name('résolution grille (x, z)');
+  field.add(t.field, 'resolution', 24, 96, 4).name('résolution grille (x, z)').listen();
   field.add(t.field, 'smoothingTime', 0, 0.2, 0.005).name('lissage temporel (s)');
-  field.add(s, 'steps', 16, 256, 1).name('pas du raymarch');
-  field.add(s, 'liquidSteps', 4, 64, 1).name('pas du liquide');
+  field.add(s, 'steps', 16, 256, 1).name('pas du raymarch').listen();
 
-  const look = render.addFolder('Aspect');
-  look.addColor(s, 'waxColor').name('cire froide');
-  look.addColor(s, 'waxHotColor').name('cire chaude');
-  look.addColor(s, 'waxDeepColor').name('cire en profondeur');
-  look.addColor(s, 'liquidColor').name('liquide');
-  look.add(s, 'liquidDensity', 0, 2, 0.01).name('densité liquide');
+  const look = render.addFolder('Cire et liquide');
+  look.addColor(s, 'waxColor').name('cire froide').listen();
+  look.addColor(s, 'waxHotColor').name('cire chaude').listen();
+  look.addColor(s, 'waxDeepColor').name('cire en profondeur').listen();
+  look.addColor(s, 'liquidColor').name('liquide').listen();
+  look.addColor(s, 'bulbColor').name('ampoule').listen();
+  look.add(s, 'liquidDensity', 0, 2, 0.01).name('densité liquide').listen();
+  look.add(s, 'liquidGlow', 0, 3, 0.01).name('diffusion liquide');
+  look.add(s, 'ior', 1, 1.6, 0.01).name('ior liquide (réfraction)');
   look.add(s, 'bulbIntensity', 0, 6, 0.05).name('ampoule');
   look.add(s, 'subsurface', 0, 3, 0.01).name('subsurface');
   look.add(s, 'thicknessScale', 0, 40, 0.5).name('extinction cire');
@@ -121,6 +133,38 @@ export function createDebugPanel(t: DebugPanelTargets): GUI {
   look.add(s, 'wrap', 0, 1, 0.01).name('wrap lighting');
   look.add(s, 'fresnel', 0, 1, 0.01).name('fresnel');
   look.close();
+
+  const glass = render.addFolder('Verre');
+  glass.add(t.glass, 'reflection', 0, 3, 0.01).name('reflets').onChange(t.updateGlass);
+  glass.add(t.glass, 'roughness', 0, 1, 0.01).name('rugosité').onChange(t.updateGlass);
+  glass.add(t.glass, 'ior', 1, 2.4, 0.01).name('ior').onChange(t.updateGlass);
+  glass.add(t.glass, 'haze', 0, 0.3, 0.005).name('voile').onChange(t.updateGlass);
+  glass.close();
+
+  const room = render.addFolder('Pièce');
+  room.add(t.room, 'environment', 0, 1.5, 0.01).name('reflets environnement');
+  room.add(t.room, 'fill', 0, 3, 0.01).name('lumière d\'appoint');
+  room.add(t.room, 'bulbLight', 0, 15, 0.1).name('ampoule (métal, sol)');
+  room.add(t.halo, 'intensity', 0, 3, 0.01).name('halo au sol');
+  room.add(t.halo, 'reach', 0.2, 4, 0.05).name('portée du halo');
+  room.close();
+
+  const post = render.addFolder('Post-process');
+  post.add(t.post, 'enabled').name('actif');
+  post.add(t.post, 'bloom').name('bloom').listen();
+  post.add(t.post, 'bloomStrength', 0, 3, 0.01).name('bloom : force');
+  post.add(t.post, 'bloomRadius', 0, 1, 0.01).name('bloom : rayon');
+  post.add(t.post, 'bloomThreshold', 0, 4, 0.01).name('bloom : seuil');
+  post.add(t.post, 'exposure', 0.1, 3, 0.01).name('exposition');
+  post.add(t.post, 'vignette', 0, 1, 0.01).name('vignette');
+  post.add(t.post, 'grain', 0, 0.2, 0.001).name('grain');
+  post.close();
+
+  const quality = render.addFolder('Qualité adaptative');
+  quality.add(t.adaptive, 'enabled').name('active');
+  quality.add(t.adaptive, 'targetFps', 24, 144, 1).name('fps visés');
+  quality.add(t.adaptive, 'downFps', 15, 120, 1).name('dégrader sous (fps)');
+  quality.close();
 
   const stats = gui.addFolder('Stats');
   stats.add(t.stats, 'fps').name('fps').disable().listen();
@@ -130,6 +174,7 @@ export function createDebugPanel(t: DebugPanelTargets): GUI {
   stats.add(t.stats, 'splatMs').name('splatting CPU (ms)').disable().listen();
   stats.add(t.stats, 'renderCpuMs').name('rendu CPU (ms)').disable().listen();
   stats.add(t.stats, 'gpuMs').name('rendu GPU (ms)').disable().listen();
+  stats.add(t.stats, 'quality').name('qualité').disable().listen();
   stats.add(t.stats, 'simTime').name('temps simulé (s)').disable().listen();
 
   return gui;
