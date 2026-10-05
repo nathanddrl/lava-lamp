@@ -3,11 +3,11 @@ import { MAX_PARTICLES, type WaxSystem } from '../sim/waxSystem';
 
 /**
  * Rendu de debug de la cire : une petite sphère instanciée par particule.
- * Remplacé plus tard par le raymarching du champ de densité.
+ * Désactivé par défaut depuis la surface raymarchée (WaxSurfaceView).
  */
 export class WaxDebugView {
   readonly mesh: THREE.InstancedMesh;
-  readonly params = { visible: true, sphereRadius: 0.036 };
+  readonly params = { visible: false, sphereRadius: 0.036 };
 
   private readonly geometry = new THREE.IcosahedronGeometry(1, 1);
   // Blanc : la couleur vient de l'attribut d'instance (température).

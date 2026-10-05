@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit && tsc --noEmit -p scripts",
     "test": "vitest run",
-    "bench": "tsx scripts/bench.ts"
+    "bench": "tsx scripts/bench.ts",
+    "bench:splat": "tsx scripts/splatBench.ts"
   },
   "repository": {
     "type": "git",

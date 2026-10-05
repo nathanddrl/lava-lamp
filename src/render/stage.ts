@@ -3,7 +3,9 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { LampProfile } from '../sim/lampProfile';
 import type { WaxSystem } from '../sim/waxSystem';
 import { createLampView, type LampView } from './lamp';
+import { GpuTimer } from './gpuTimer';
 import { WaxDebugView } from './waxDebugView';
+import { WaxSurfaceView } from './waxSurfaceView';
 
 /**
  * Scène, caméra, contrôles, lumières et renderer. Ne connaît la simulation
@@ -16,11 +18,16 @@ export class Stage {
   readonly controls: OrbitControls;
   readonly lamp: LampView;
   readonly waxDebug = new WaxDebugView();
+  readonly waxSurface: WaxSurfaceView;
+  /** Temps GPU de toute la frame (scène complète), ms. */
+  readonly gpuTimer: GpuTimer;
+  /** Temps CPU de soumission du rendu (renderer.render), ms. */
+  renderCpuMs = 0;
 
   private readonly container: HTMLElement;
   private readonly resizeObserver: ResizeObserver;
 
-  constructor(container: HTMLElement, profile: LampProfile) {
+  constructor(container: HTMLElement, profile: LampProfile, wax: WaxSystem) {
     this.container = container;
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -57,6 +64,9 @@ export class Stage {
     this.lamp = createLampView(profile);
     this.scene.add(this.lamp.group);
     this.scene.add(this.waxDebug.mesh);
+    this.waxSurface = new WaxSurfaceView(profile, wax, this.renderer);
+    this.scene.add(this.waxSurface.waxMesh, this.waxSurface.liquidMesh);
+    this.gpuTimer = new GpuTimer(this.renderer.getContext() as WebGL2RenderingContext);
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(container);
@@ -101,11 +111,18 @@ export class Stage {
   /**
    * @param alpha fraction [0, 1) du pas fixe écoulée depuis le dernier step :
    * le rendu interpole entre les deux derniers états de la simulation.
+   * @param frameDt temps réel écoulé depuis la frame précédente (lissage temporel du champ).
    */
-  render(wax: WaxSystem, alpha: number): void {
+  render(wax: WaxSystem, alpha: number, frameDt: number): void {
     this.waxDebug.update(wax, alpha);
+    this.waxSurface.update(wax, alpha, frameDt);
     this.controls.update();
+    const t0 = performance.now();
+    this.gpuTimer.begin();
     this.renderer.render(this.scene, this.camera);
+    this.gpuTimer.end();
+    const ms = performance.now() - t0;
+    this.renderCpuMs += (ms - this.renderCpuMs) * 0.05;
   }
 
   dispose(): void {
@@ -113,6 +130,8 @@ export class Stage {
     this.controls.dispose();
     this.lamp.dispose();
     this.waxDebug.dispose();
+    this.waxSurface.dispose();
+    this.gpuTimer.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }
