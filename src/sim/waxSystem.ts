@@ -162,17 +162,17 @@ export const DEFAULT_WAX_PARAMS: WaxParams = {
   neutralTemperature: 0.5,
   meltHysteresis: 0.3,
   // Chaleur latente : sans elle, la colonne devient une fontaine permanente (jet).
-  meltDelay: 2.5,
+  meltDelay: 2.75,
   // Point chaud mince et étroit : seule une petite fraction du réservoir fond à la fois.
-  heatRate: 4,
+  heatRate: 3.3,
   heatFalloff: 0.03,
-  heatRadius: 0.06,
+  heatRadius: 0.065,
   // Ambiance stratifiée : sous la bande morte au fond (le réservoir reste figé),
   // au centre de la bande au milieu (aucune bascule en route), froide sous le capuchon.
   coolRate: 0.1,
   ambientBottom: 0.2,
   ambientMid: 0.5,
-  ambientTop: 0.05,
+  ambientTop: 0.24,
   ambientBottomHeight: 0.15,
   ambientTopStart: 0.9,
   coolTopBoost: 30,

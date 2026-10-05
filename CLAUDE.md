@@ -111,17 +111,17 @@ T ∈ [0, 1] par particule :
 
     dT/dt = chauffe(y, r)·(1 − T) + échange(y, r)·exposition·(T_amb(y) − T) + conduction
 
-- **Chauffe** : point chaud gaussien mince et étroit au centre du fond (falloff 0.03,
-  rayon 0.05) → seule une petite fraction du réservoir fond à la fois, colonne étroite.
+- **Chauffe** : point chaud gaussien mince et étroit au centre du fond (taux 3.3, falloff 0.03,
+  rayon 0.065) → seule une petite fraction du réservoir fond à la fois, colonne étroite.
 - **Ambiance stratifiée T_amb(y)** : 0.2 au fond (sous la bande morte → le réservoir reste
   figé), 0.5 sur toute la zone médiane (au centre de la bande morte → une goutte ne change
-  jamais d'état en route), 0.05 sous le capuchon à partir de 90 % de la hauteur.
+  jamais d'état en route), 0.24 sous le capuchon à partir de 90 % de la hauteur.
 - **Échange** avec le liquide : taux × (1 + boost haut + boost paroi), atténué au cœur des
   blobs (exposition estimée par la densité locale).
 - **Flottabilité** ∝ (T − Tn) avec **hystérésis de fusion** (δ = 0.3) : Tn − δ/2 pour une
   particule fondue, Tn + δ/2 pour une figée (bascule de Schmitt).
 - **Viscosité thermique** : σ et β × 0.05 pour la cire fondue (interpolé sur la bande).
-- **Chaleur latente** (`meltDelay` 2.5 s) : une particule figée doit rester 2.5 s au-dessus
+- **Chaleur latente** (`meltDelay` 2.75 s) : une particule figée doit rester 2.75 s au-dessus
   de Tn + δ/2 avant de fondre. Sans elle, la cire voisine d'une colonne déjà formée garde le
   point chaud chaud, qui refond en continu tout ce qu'on lui amène : **fontaine permanente**
   réservoir → capuchon (régime « jet »). Avec, la colonne se tarit et le point chaud lâche
@@ -155,21 +155,28 @@ Pourquoi chaque ingrédient existe — **ne rien retirer sans repasser au banc**
    chaud plus large ou un délai de fusion plus court ramènent le jet ; un délai plus long
    (≥ 3 s) donne des gouttes trop petites.
 
-Comportement observé : des paquets fondent au point chaud, montent en colonne courte ou en
-goutte, se détachent, s'aplatissent sous le capuchon, refroidissent et redescendent. Le
-seuil de démarrage est abrupt : chauffe < ~3.5 → le point chaud ne fond plus.
+9. Réglage final (chauffe 3.3, rayon 0.065, délai 2.75 s, ambiance haute 0.24) : compromis
+   entre le réglage précédent (chauffe 4, gouttes médiane ~55, colonne 13 %, jusqu'à 19 s)
+   et un essai manuel (chauffe 3, ambiance haute 0.24 : colonne 0 % mais gouttes médiane ~21).
+   Plus de chauffe, un point chaud plus large ou un délai plus court grossissent les gouttes
+   **et** ramènent la colonne ; c'est le couplage central du modèle.
 
-Résultats au banc (10 min simulées, après 60 s de mise en route, graine 1) :
+Comportement observé : des paquets fondent au point chaud, montent en colonne courte ou en
+goutte, se détachent, s'aplatissent sous le capuchon, refroidissent et redescendent. Avec la
+chaleur latente, une chauffe de 3 suffit encore à faire fondre le point chaud (l'ancien seuil
+« ~4 » datait d'avant `meltDelay`).
+
+Résultats au banc (10 min simulées, après 60 s de mise en route) :
 
 | preset    | réservoir min/moy | gouttes/min | taille méd. naissance (max) | 40–150 | têtes ≥ 90 % | colonne (plus longue) |
 |-----------|-------------------|-------------|-----------------------------|--------|--------------|-----------------------|
-| équilibré | 78 % / 82 %       | 10.2        | 54 (171)                    | 55 %   | 60 %         | 13 % (19 s)           |
-| calme     | 76 % / 82 %       | 5.7         | 69 (175)                    | 57 %*  | 79 %         | 15 % (13 s)           |
-| agité     | 82 % / 85 %       | 17.9        | 33 (145)                    | 40 %   | 38 %         | 3 % (4 s)             |
+| équilibré | 78 % / 82 %       | 10.2        | 40 (55)                     | 49 %*  | 54 %         | 9 % (7 s)             |
+| calme     | 73 % / 81 %       | 4.7         | 68 (95)                     | 50 %   | 86 %         | 20 % (21 s)           |
+| agité     | 80 % / 84 %       | 18.6        | 32 (35)                     | 38 %   | 34 %         | 1 % (1 s)             |
 
-\* à la naissance ; en taille max (fusions en vol comprises) le calme passe sous 50 %.
-Équilibré sur 4 graines : tous les objectifs tenus à chaque fois (colonne 13–18 %).
-Aucun preset ne s'arrête ni ne reste collé en haut sur 10 min.
+\* 40–150 majoritaire en taille max. Équilibré sur 3 graines : colonne 4–9 % (≤ 7 s),
+médiane 44–55, têtes ≥ 90 % entre 44 et 54 %. Aucun preset ne s'arrête ni ne reste collé
+en haut sur 10 min.
 
 Coût mesuré : ~3 ms CPU par pas fixe (800 particules), 1 pas par frame à 60 fps.
 
@@ -232,6 +239,7 @@ Pipeline par frame : splatting CPU → upload texture 3D → raymarch dans le ve
 3. ✅ Thermique : cycle chauffe/montée/refroidissement/descente, presets, banc headless.
    ✅ 3 bis : ambiance stratifiée, chauffe localisée, viscosité thermique (gouttes 40–150, têtes > 90 %).
    ✅ 3 ter : chaleur latente contre la fontaine permanente ; vitesse jusqu'à ×10.
+   ✅ 3 quater : compromis gouttes plus grosses / pas de colonne (chauffe 3.3, ambiance haute 0.24).
 4. ✅ Rendu raymarching du champ de densité dans le volume du verre (bornage par le profil).
 5. Matériaux : verre réfractif, liquide teinté, cire émissive/subsurface, glow de l'ampoule.
 6. Perf : profiling, résolution du raymarch adaptative, budget 60 fps.
