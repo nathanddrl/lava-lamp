@@ -24,6 +24,8 @@ npm run typecheck
 npm test           # vitest (src/**/*.test.ts)
 npm run bench -- [--preset calme] [--seconds 600] [--set clé=valeur ...] [--summary] [--sections 10]
                    # banc headless : répartition, suivi des gouttes, verdicts (+ coupes ASCII)
+npm run bench:splat -- [--hz 60] [--jitter 0.3] [--resolution 48] [--kernel 0.085]
+                   # banc du champ de densité : coût CPU, scintillement, occupation
 ```
 
 ## Architecture
@@ -40,13 +42,18 @@ src/
     *.test.ts            Tests vitest (grille vs force brute, stabilité de la cire).
   render/   Tout ce qui touche Three.js : scène, caméra, matériaux, shaders.
     lamp.ts          LatheGeometry des 3 pièces générées depuis LampProfile.
-    stage.ts         Renderer, scène, OrbitControls bornés, lumières, sol, resize.
-    waxDebugView.ts  InstancedMesh de sphères (debug), interpolé entre deux pas fixes.
+    stage.ts         Renderer, scène, OrbitControls bornés, lumières, sol, resize, chronos.
+    densityField.ts  Splatting CPU des particules en grille 3D (pur TS, sans three, testé).
+    waxSurfaceView.ts  Texture 3D du champ + meshes raymarchés de la cire et du liquide.
+    gpuTimer.ts      Temps GPU de la frame (EXT_disjoint_timer_query_webgl2).
+    waxDebugView.ts  InstancedMesh de sphères (debug, désactivé par défaut).
+    shaders/         volume.vert, volumeCommon (liquide, masque du verre), wax.frag, liquid.frag.
   ui/       Panneau lil-gui (debug). Ne contient pas de logique métier.
   main.ts   Assemblage + boucle (accumulateur à pas fixe).
 scripts/
-  bench.ts  Banc headless (tsx) : répartition par hauteur, suivi individuel des gouttes
-            (taille, hauteur max, fusions en vol, départs), ligne OBJECTIFS en fin de run.
+  bench.ts       Banc headless (tsx) : répartition par hauteur, suivi individuel des gouttes
+                 (taille, hauteur max, fusions en vol, départs), ligne OBJECTIFS en fin de run.
+  splatBench.ts  Banc du champ de densité (coût, allers-retours au seuil, occupation).
 ```
 
 Sens des dépendances : `main → render → sim`, `main → ui`, `main → sim`. Jamais `sim → render/ui`.
@@ -74,8 +81,9 @@ Unités : **1 unité = 10 cm**, Y vers le haut, sol en y = 0, axe de la lampe en
 - `sim.params.timeScale` (0 à ×10) et `sim.params.paused` agissent sur l'accumulateur. À
   ~3 ms/pas, ×10 demande ~30 ms de physique par frame : le compteur « vitesse réelle »
   du panneau affiche la vitesse effectivement atteinte.
-- `stage.render(alpha)` reçoit `alpha = accumulator / FIXED_DT` pour interpoler
-  l'état entre deux steps (à exploiter quand les particules existent).
+- `stage.render(wax, alpha, frameDt)` reçoit `alpha = accumulator / FIXED_DT` : le
+  splatting interpole les positions entre les deux derniers pas fixes.
+- En dev, `window.lava = { sim, stage, stats }` (console, captures automatisées).
 
 ### Cire (src/sim/waxSystem.ts)
 
@@ -172,6 +180,46 @@ en haut sur 10 min.
 
 Coût mesuré : ~3 ms CPU par pas fixe (800 particules), 1 pas par frame à 60 fps.
 
+### Rendu de la cire (étape 4)
+
+Pipeline par frame : splatting CPU → upload texture 3D → raymarch dans le verre.
+
+- **Champ** (`DensityField`) : grille alignée sur le récipient, voxels cubiques
+  (48 × 94 × 48 par défaut, voxel ≈ 0.025), marge d'1.5 voxel. Noyau séparable à support
+  compact k(u) = (1 − u²)³ par axe (rayon 0.085) : 3 petits tableaux de poids par particule.
+  Normalisé par la densité de cœur d'une cire de Clavet au repos (ρ0 / (2π/15 · h³)) :
+  **le champ vaut ≈ 1 dans la masse** (médiane 0.89 aux particules), 0.5 en surface,
+  ≈ 0.33 au centre d'une particule isolée (invisible au seuil 0.5 : pas de poussière).
+  Canaux RG entrelacés : densité, température × densité. Upload en `RG32F` si
+  `OES_texture_float_linear`, sinon `RG16F` (conversion par le pilote).
+- **Lissage temporel** : champ ← keep·champ + (1 − keep)·splat, keep = exp(−dt/τ), τ = 0.04 s,
+  appliqué en place (pas de second tampon). Lignes inactives remises à zéro puis ignorées.
+  Mesure : 0.00 % de voxels de surface en aller-retour au seuil, même sans lissage
+  (l'interpolation alpha suffit) ; le lissage efface le résidu (0.02 % max à 60 Hz ± 30 %).
+- **Occupation** : blocs de 4³ voxels marqués par l'empreinte (dilatée d'un voxel) des
+  particules, persistants tant que la contribution n'a pas décru sous 2 %. Le raymarch
+  saute les blocs vides d'un coup : ~17 % des blocs occupés, **3× moins de lectures**
+  de texture (1080p, lampe plein écran : 46 M au lieu de 138 M par frame).
+- **Raymarch** (`wax.frag.glsl`, passe opaque) : faces arrière du volume intérieur (Lathe
+  fermé du profil), segment = boîte du liquide ∩ [caméra, face arrière]. Pas uniforme
+  (≥ ½ voxel), bissection (6) au franchissement du seuil, normale = −∇ (différences
+  centrales sur 1 voxel ; le tricubique B-spline a été essayé : identique à l'œil, 8× plus
+  cher). Densité × masque du verre (LUT du rayon intérieur) : la cire s'aplatit contre la
+  paroi au lieu de la traverser. Écrit `gl_FragDepth` → composition correcte avec socle,
+  capuchon et verre.
+- **Shading** : wrap lighting (clé, contre-jour, ampoule), spéculaire large et faible,
+  fresnel doux vers la lumière du liquide, faux subsurface = lumière de l'ampoule × exp(−
+  épaisseur le long du rayon), émission selon la température et la proximité du fond.
+  Épaisseur : 10 échantillons à pas croissants, poids continu en densité (un poids
+  binaire dessinait des paliers horizontaux sur le réservoir).
+- **Liquide** (`liquid.frag.glsl`, passe transparente, renderOrder 5 < verre 10) : mêmes
+  faces arrière, émission-absorption le long du rayon, lueur de l'ampoule décroissant
+  avec la hauteur. Là où la cire est visible, sa profondeur masque ce fragment (la cire a
+  déjà intégré le liquide devant elle).
+- Mesures (Xeon 2.1 GHz, Node/V8) : splatting **1.1–1.25 ms médian, p95 ~1.3–1.9 ms**
+  (800 particules, 48³ × 2). Temps GPU : compteur « rendu GPU » du panneau (timer query) ;
+  non mesurable ici (rendu logiciel SwiftShader).
+
 ## Conventions
 
 - TypeScript strict (+ `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`,
@@ -192,6 +240,6 @@ Coût mesuré : ~3 ms CPU par pas fixe (800 particules), 1 pas par frame à 60 f
    ✅ 3 bis : ambiance stratifiée, chauffe localisée, viscosité thermique (gouttes 40–150, têtes > 90 %).
    ✅ 3 ter : chaleur latente contre la fontaine permanente ; vitesse jusqu'à ×10.
    ✅ 3 quater : compromis gouttes plus grosses / pas de colonne (chauffe 3.3, ambiance haute 0.24).
-4. Rendu raymarching du champ de densité dans le volume du verre (bornage par le profil).
+4. ✅ Rendu raymarching du champ de densité dans le volume du verre (bornage par le profil).
 5. Matériaux : verre réfractif, liquide teinté, cire émissive/subsurface, glow de l'ampoule.
 6. Perf : profiling, résolution du raymarch adaptative, budget 60 fps.

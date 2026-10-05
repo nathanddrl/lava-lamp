@@ -14,15 +14,26 @@ if (!app) throw new Error('#app introuvable');
 
 const profile = new LampProfile();
 const sim = new Simulation(profile);
-const stage = new Stage(app, profile);
+const stage = new Stage(app, profile, sim.wax);
 
-const stats: LoopStats = { fps: 0, stepsPerFrame: 0, stepMs: 0, simTime: 0, realSpeed: 0 };
+const stats: LoopStats = {
+  fps: 0,
+  stepsPerFrame: 0,
+  stepMs: 0,
+  simTime: 0,
+  realSpeed: 0,
+  splatMs: 0,
+  renderCpuMs: 0,
+  gpuMs: 'n/d',
+};
 const gui = createDebugPanel({
   simParams: sim.params,
   waxParams: sim.wax.params,
   stats,
   glassMaterial: stage.lamp.glassMaterial,
   waxView: stage.waxDebug.params,
+  surface: stage.waxSurface.params,
+  field: stage.waxSurface.field.params,
   reset: () => sim.reset(),
   impulse: () => sim.impulse(),
   applyPreset: (name: PresetName) => {
@@ -62,7 +73,7 @@ function frame(now: number): void {
   // Si on n'a pas pu rattraper, on abandonne le retard plutôt que de l'accumuler.
   if (steps === MAX_STEPS_PER_FRAME) accumulator = Math.min(accumulator, FIXED_DT);
 
-  stage.render(sim.wax, accumulator / FIXED_DT);
+  stage.render(sim.wax, accumulator / FIXED_DT, frameDt);
 
   fpsFrames++;
   if (now - fpsWindowStart >= 500) {
@@ -73,12 +84,19 @@ function frame(now: number): void {
     fpsFrames = 0;
     fpsWindowStart = now;
     stats.stepMs = Math.round(stepMsAvg * 100) / 100;
+    stats.splatMs = Math.round(stage.waxSurface.splatMs * 100) / 100;
+    stats.renderCpuMs = Math.round(stage.renderCpuMs * 100) / 100;
+    const gpu = stage.gpuTimer.ms;
+    stats.gpuMs = Number.isNaN(gpu) ? 'n/d' : (Math.round(gpu * 100) / 100).toString();
   }
   stats.stepsPerFrame = steps;
   stats.simTime = Math.round(sim.time * 100) / 100;
 }
 
 stage.renderer.setAnimationLoop(frame);
+
+// Accès console en dev (et pour les captures automatisées) : `lava.sim`, `lava.stage`.
+if (import.meta.env.DEV) Object.assign(window, { lava: { sim, stage, stats } });
 
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {

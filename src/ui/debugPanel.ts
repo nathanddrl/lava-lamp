@@ -2,6 +2,8 @@ import GUI from 'lil-gui';
 import type { SimulationParams } from '../sim/simulation';
 import { DEFAULT_PRESET, WAX_PRESETS, type PresetName } from '../sim/presets';
 import { MAX_PARTICLES, type WaxParams } from '../sim/waxSystem';
+import type { DensityFieldParams } from '../render/densityField';
+import type { WaxSurfaceParams } from '../render/waxSurfaceView';
 
 /** Compteurs mis à jour par la boucle et affichés en lecture seule. */
 export interface LoopStats {
@@ -12,6 +14,12 @@ export interface LoopStats {
   simTime: number;
   /** Vitesse réellement atteinte (temps simulé / temps réel). */
   realSpeed: number;
+  /** Temps CPU du splatting du champ de densité, ms. */
+  splatMs: number;
+  /** Temps CPU de soumission du rendu, ms. */
+  renderCpuMs: number;
+  /** Temps GPU de la frame, ms ('n/d' sans EXT_disjoint_timer_query_webgl2). */
+  gpuMs: string;
 }
 
 export interface DebugPanelTargets {
@@ -20,6 +28,8 @@ export interface DebugPanelTargets {
   stats: LoopStats;
   glassMaterial: { opacity: number };
   waxView: { visible: boolean; sphereRadius: number };
+  surface: WaxSurfaceParams;
+  field: DensityFieldParams;
   reset: () => void;
   impulse: () => void;
   applyPreset: (name: PresetName) => void;
@@ -83,15 +93,43 @@ export function createDebugPanel(t: DebugPanelTargets): GUI {
   th.add(w, 'meltDelay', 0, 6, 0.05).name('délai de fusion (s)');
 
   const render = gui.addFolder('Rendu');
+  const s = t.surface;
+  render.add(s, 'visible').name('surface cire');
+  render.add(s, 'liquidVisible').name('liquide');
   render.add(t.waxView, 'visible').name('sphères debug');
   render.add(t.waxView, 'sphereRadius', 0.005, 0.12, 0.001).name('taille sphères');
   render.add(t.glassMaterial, 'opacity', 0, 1, 0.01).name('opacité verre');
+
+  const field = render.addFolder('Champ de densité');
+  field.add(s, 'threshold', 0.05, 1.5, 0.01).name('seuil');
+  field.add(t.field, 'kernelRadius', 0.03, 0.2, 0.005).name('rayon du noyau');
+  field.add(t.field, 'resolution', 24, 96, 4).name('résolution grille (x, z)');
+  field.add(t.field, 'smoothingTime', 0, 0.2, 0.005).name('lissage temporel (s)');
+  field.add(s, 'steps', 16, 256, 1).name('pas du raymarch');
+  field.add(s, 'liquidSteps', 4, 64, 1).name('pas du liquide');
+
+  const look = render.addFolder('Aspect');
+  look.addColor(s, 'waxColor').name('cire froide');
+  look.addColor(s, 'waxHotColor').name('cire chaude');
+  look.addColor(s, 'waxDeepColor').name('cire en profondeur');
+  look.addColor(s, 'liquidColor').name('liquide');
+  look.add(s, 'liquidDensity', 0, 2, 0.01).name('densité liquide');
+  look.add(s, 'bulbIntensity', 0, 6, 0.05).name('ampoule');
+  look.add(s, 'subsurface', 0, 3, 0.01).name('subsurface');
+  look.add(s, 'thicknessScale', 0, 40, 0.5).name('extinction cire');
+  look.add(s, 'emission', 0, 2, 0.01).name('émission');
+  look.add(s, 'wrap', 0, 1, 0.01).name('wrap lighting');
+  look.add(s, 'fresnel', 0, 1, 0.01).name('fresnel');
+  look.close();
 
   const stats = gui.addFolder('Stats');
   stats.add(t.stats, 'fps').name('fps').disable().listen();
   stats.add(t.stats, 'realSpeed').name('vitesse réelle ×').disable().listen();
   stats.add(t.stats, 'stepsPerFrame').name('steps / frame').disable().listen();
   stats.add(t.stats, 'stepMs').name('ms / step').disable().listen();
+  stats.add(t.stats, 'splatMs').name('splatting CPU (ms)').disable().listen();
+  stats.add(t.stats, 'renderCpuMs').name('rendu CPU (ms)').disable().listen();
+  stats.add(t.stats, 'gpuMs').name('rendu GPU (ms)').disable().listen();
   stats.add(t.stats, 'simTime').name('temps simulé (s)').disable().listen();
 
   return gui;
