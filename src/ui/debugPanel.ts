@@ -10,6 +10,8 @@ export interface LoopStats {
   /** Temps CPU moyen d'un pas fixe de simulation, en ms. */
   stepMs: number;
   simTime: number;
+  /** Vitesse réellement atteinte (temps simulé / temps réel). */
+  realSpeed: number;
 }
 
 export interface DebugPanelTargets {
@@ -29,7 +31,7 @@ export function createDebugPanel(t: DebugPanelTargets): GUI {
 
   const sim = gui.addFolder('Simulation');
   sim.add(t.simParams, 'paused').name('pause');
-  sim.add(t.simParams, 'timeScale', 0, 4, 0.05).name('vitesse');
+  sim.add(t.simParams, 'timeScale', 0, 10, 0.1).name('vitesse');
   sim.add(actions, 'impulse').name('impulsion ↑');
   sim.add(actions, 'reset').name('reset');
   sim
@@ -78,6 +80,7 @@ export function createDebugPanel(t: DebugPanelTargets): GUI {
   th.add(w, 'buoyancyMax', 0.5, 1000, 0.5).name('flottabilité max');
   th.add(w, 'neutralTemperature', 0, 1, 0.01).name('T neutre');
   th.add(w, 'meltHysteresis', 0, 0.8, 0.01).name('hystérésis fusion');
+  th.add(w, 'meltDelay', 0, 6, 0.05).name('délai de fusion (s)');
 
   const render = gui.addFolder('Rendu');
   render.add(t.waxView, 'visible').name('sphères debug');
@@ -86,6 +89,7 @@ export function createDebugPanel(t: DebugPanelTargets): GUI {
 
   const stats = gui.addFolder('Stats');
   stats.add(t.stats, 'fps').name('fps').disable().listen();
+  stats.add(t.stats, 'realSpeed').name('vitesse réelle ×').disable().listen();
   stats.add(t.stats, 'stepsPerFrame').name('steps / frame').disable().listen();
   stats.add(t.stats, 'stepMs').name('ms / step').disable().listen();
   stats.add(t.stats, 'simTime').name('temps simulé (s)').disable().listen();

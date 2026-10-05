@@ -103,7 +103,7 @@ let inFlightMerges = 0;
 let prevDrop = new Int32Array(n).fill(-1);
 let curDrop = new Int32Array(n).fill(-1);
 
-function trackDrops(t: number): { reservoirFrac: number; inFlight: number } {
+function trackDrops(t: number): { reservoirFrac: number; inFlight: number; reservoirTop: number } {
   labelClusters();
   const x = wax.positions;
   const members = new Map<number, number[]>();
@@ -117,11 +117,13 @@ function trackDrops(t: number): { reservoirFrac: number; inFlight: number } {
   }
   curDrop.fill(-1);
   let reservoirCount = 0;
+  let reservoirTop = 0;
   const seen = new Set<number>();
   let inFlight = 0;
   for (const [root, list] of members) {
     if (touches.has(root)) {
       reservoirCount += list.length;
+      for (const i of list) reservoirTop = Math.max(reservoirTop, (x[3 * i + 1]! - yMin) / H);
       continue;
     }
     if (list.length < MIN_DROP) continue;
@@ -167,7 +169,7 @@ function trackDrops(t: number): { reservoirFrac: number; inFlight: number } {
     live.delete(id);
   }
   [prevDrop, curDrop] = [curDrop, prevDrop];
-  return { reservoirFrac: reservoirCount / n, inFlight };
+  return { reservoirFrac: reservoirCount / n, inFlight, reservoirTop };
 }
 
 // ---------------------------------------------------------------- coupes ASCII
@@ -205,7 +207,12 @@ const BARS = ' ▁▂▃▄▅▆▇█';
 const bottomSeries: number[] = [];
 const upperSeries: number[] = [];
 let simMs = 0;
-let lastTrack = { reservoirFrac: 1, inFlight: 0 };
+let lastTrack = { reservoirFrac: 1, inFlight: 0, reservoirTop: 0 };
+/** Secondes où le réservoir est relié, sans rupture, à la cire au-dessus de 80 % (fontaine). */
+let columnSeconds = 0;
+let trackedSeconds = 0;
+let column = 0;
+let longestColumn = 0;
 
 if (!summaryOnly) {
   console.log(`preset=${presetName} N=${n} durée=${seconds}s dt=${SIM_FIXED_DT.toFixed(4)} overrides=${JSON.stringify(overrides)}`);
@@ -220,6 +227,12 @@ for (let s = 1; s <= totalSteps; s++) {
   if (s % stepsPerTrack === 0) {
     lastTrack = trackDrops(t);
     if (t >= WARMUP) {
+      trackedSeconds++;
+      if (lastTrack.reservoirTop > 0.8) {
+        columnSeconds++;
+        column++;
+      } else column = 0;
+      longestColumn = Math.max(longestColumn, column);
       let bottom = 0;
       let upper = 0;
       for (let i = 0; i < n; i++) {
@@ -318,11 +331,12 @@ const lines = [
   `têtes (≥ 20 part.) : ${heads.length}, hauteur max médiane ${(median(heads.map((d) => d.maxHead)) * 100).toFixed(0)} %, ≥ 90 % : ${pct(high, heads.length)}`,
   `montée (détachement → 85 %) médiane ${median(riseTimes).toFixed(1)} s`,
   `variété : fusions en vol ${inFlightMerges}, intervalle entre départs médian ${median(gaps).toFixed(1)} s (CV ${cv(gaps).toFixed(2)})`,
+  `colonne permanente (réservoir relié à > 80 %) : ${pct(columnSeconds, trackedSeconds)} du temps, plus longue ${longestColumn} s`,
   `verdicts : plus longue pause sans cire en haut ${longestIdle} s, échantillons « tout en haut » ${stuckTop}`,
 ];
 console.log(lines.join('\n'));
 const ok = (b: boolean): string => (b ? 'OK ' : '-- ');
 console.log(
-  `OBJECTIFS ${ok(sizes.length > 0 && inTarget / sizes.length >= 0.5)}40–150 majoritaire  ${ok(sizes.every((k) => k <= 250))}aucune > 250  ${ok(resMin >= 0.4)}réservoir ≥ 40 %  ${ok(heads.length > 0 && high / heads.length > 0.5)}têtes ≥ 90 %  ${ok(longestIdle < 60 && stuckTop === 0)}cycle continu`,
+  `OBJECTIFS ${ok(sizes.length > 0 && inTarget / sizes.length >= 0.5)}40–150 majoritaire  ${ok(sizes.every((k) => k <= 250))}aucune > 250  ${ok(resMin >= 0.4)}réservoir ≥ 40 %  ${ok(heads.length > 0 && high / heads.length > 0.5)}têtes ≥ 90 %  ${ok(longestIdle < 60 && stuckTop === 0)}cycle continu  ${ok(columnSeconds <= 0.25 * trackedSeconds && longestColumn < 30)}pas de colonne permanente`,
 );
 if (args.includes('--snapshot')) printSection('finale');

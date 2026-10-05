@@ -8,13 +8,13 @@ export type PresetName = 'équilibré' | 'calme' | 'agité';
 /** Variantes thermiques, appliquées par-dessus DEFAULT_WAX_PARAMS (= « équilibré »). */
 export const WAX_PRESETS: Record<PresetName, Partial<WaxParams>> = {
   'équilibré': {},
-  // Pas d'échange par le verre (départs plus rares), traînée plus forte (montées plus
-  // lentes), chauffe un peu relevée pour rester au-dessus du seuil de démarrage :
-  // en dessous de ~4, le point chaud ne fond plus et tout se fige.
-  calme: { wallCooling: 0, drag: 70, heatRate: 4.3 },
-  // Chauffe et échange par le verre plus forts, flottabilité plus forte : départs
-  // rapprochés et irréguliers, nombreuses fusions en vol.
-  'agité': { heatRate: 4.5, wallCooling: 15, buoyancy: 70 },
+  // Flottabilité plus faible : montées plus lentes, gouttes un peu plus grosses et deux
+  // fois plus rares ; fusion un peu plus lente pour ne pas retomber dans le jet continu.
+  // Attention : plus de chauffe ou plus de traînée ramènent la colonne permanente.
+  calme: { buoyancy: 50, meltDelay: 2.75 },
+  // Flottabilité et échange par le verre plus forts : départs fréquents et irréguliers,
+  // gouttes plus petites, têtes qui redescendent parfois avant le capuchon.
+  'agité': { buoyancy: 70, wallCooling: 15 },
 };
 
 export const DEFAULT_PRESET: PresetName = 'équilibré';

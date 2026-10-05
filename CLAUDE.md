@@ -69,9 +69,11 @@ Unités : **1 unité = 10 cm**, Y vers le haut, sol en y = 0, axe de la lampe en
 
 - Physique à **pas fixe** `SIM_FIXED_DT = 1/60 s` (× 2 sous-pas) via un accumulateur, découplé
   du framerate. 1/120 coûtait ~7 ms/frame à 800 particules ; à 1/60, ~3 ms et c'est stable.
-- `frameDt` borné à 0.1 s (onglet suspendu), au plus 8 steps par frame ; au-delà on
+- `frameDt` borné à 0.1 s (onglet suspendu), au plus 12 steps par frame ; au-delà on
   jette le retard (pas de spirale de la mort).
-- `sim.params.timeScale` et `sim.params.paused` agissent sur l'accumulateur.
+- `sim.params.timeScale` (0 à ×10) et `sim.params.paused` agissent sur l'accumulateur. À
+  ~3 ms/pas, ×10 demande ~30 ms de physique par frame : le compteur « vitesse réelle »
+  du panneau affiche la vitesse effectivement atteinte.
 - `stage.render(alpha)` reçoit `alpha = accumulator / FIXED_DT` pour interpoler
   l'état entre deux steps (à exploiter quand les particules existent).
 
@@ -111,6 +113,11 @@ T ∈ [0, 1] par particule :
 - **Flottabilité** ∝ (T − Tn) avec **hystérésis de fusion** (δ = 0.3) : Tn − δ/2 pour une
   particule fondue, Tn + δ/2 pour une figée (bascule de Schmitt).
 - **Viscosité thermique** : σ et β × 0.05 pour la cire fondue (interpolé sur la bande).
+- **Chaleur latente** (`meltDelay` 2.5 s) : une particule figée doit rester 2.5 s au-dessus
+  de Tn + δ/2 avant de fondre. Sans elle, la cire voisine d'une colonne déjà formée garde le
+  point chaud chaud, qui refond en continu tout ce qu'on lui amène : **fontaine permanente**
+  réservoir → capuchon (régime « jet »). Avec, la colonne se tarit et le point chaud lâche
+  des paquets (régime « goutte à goutte »).
 
 Pourquoi chaque ingrédient existe — **ne rien retirer sans repasser au banc** :
 1. Forces faibles → tout reste figé (le fluide de Clavet a un seuil d'écoulement). Il faut
@@ -132,22 +139,29 @@ Pourquoi chaque ingrédient existe — **ne rien retirer sans repasser au banc**
    (médiane 120–145) ; l'échange paroi (10) double la fréquence des gouttes. Les deux
    derniers ne valent qu'ensemble.
 
-Comportement observé : la colonne monte jusqu'au capuchon puis se rompt à la base ; la
-tête s'aplatit, refroidit et redescend. Les gouttes se détachent donc en haut, pas à
-mi-hauteur (métrique « montée » ≈ 0 s). Le seuil de démarrage est abrupt : chauffe < ~4
-ou traînée ≥ 80 → le point chaud ne fond plus et tout se fige.
+8. Fontaine permanente (signalée à l'œil, invisible des premières métriques du banc qui ne
+   comptaient que les gouttes) : 62 % du temps en équilibré, 88 % en agité. Corrigée par
+   la chaleur latente. Le banc mesure désormais la part du temps où le réservoir est relié
+   sans rupture à la cire au-dessus de 80 % (objectif ≤ 25 %, jamais ≥ 30 s d'affilée).
+   Régime jet ↔ goutte à goutte très tranché : plus de chauffe, plus de traînée, un point
+   chaud plus large ou un délai de fusion plus court ramènent le jet ; un délai plus long
+   (≥ 3 s) donne des gouttes trop petites.
+
+Comportement observé : des paquets fondent au point chaud, montent en colonne courte ou en
+goutte, se détachent, s'aplatissent sous le capuchon, refroidissent et redescendent. Le
+seuil de démarrage est abrupt : chauffe < ~3.5 → le point chaud ne fond plus.
 
 Résultats au banc (10 min simulées, après 60 s de mise en route, graine 1) :
 
-| preset    | réservoir min/moy | gouttes/min | taille médiane (max) | 40–150 | têtes ≥ 90 % | plus longue pause |
-|-----------|-------------------|-------------|----------------------|--------|--------------|-------------------|
-| équilibré | 71 % / 76 %       | 4.2         | 130 (229)            | 50 %   | 94 %         | 0 s               |
-| calme     | 68 % / 75 %       | 2.2         | 162 (243)            | 25 %   | 83 %         | 28 s              |
-| agité     | 71 % / 74 %       | 2.0         | 143 (224)            | 39 %   | 82 %         | 0 s               |
+| preset    | réservoir min/moy | gouttes/min | taille méd. naissance (max) | 40–150 | têtes ≥ 90 % | colonne (plus longue) |
+|-----------|-------------------|-------------|-----------------------------|--------|--------------|-----------------------|
+| équilibré | 78 % / 82 %       | 10.2        | 54 (171)                    | 55 %   | 60 %         | 13 % (19 s)           |
+| calme     | 76 % / 82 %       | 5.7         | 69 (175)                    | 57 %*  | 79 %         | 15 % (13 s)           |
+| agité     | 82 % / 85 %       | 17.9        | 33 (145)                    | 40 %   | 38 %         | 3 % (4 s)             |
 
-Équilibré sur 5 graines : objectifs tenus sur 4 ; la graine 2 est à 50 % pile dans 40–150
-à la naissance (sous 50 % en taille max). Variété : 2 à 9 fusions en vol par run,
-intervalles entre départs irréguliers (CV 0.8 à 2.4).
+\* à la naissance ; en taille max (fusions en vol comprises) le calme passe sous 50 %.
+Équilibré sur 4 graines : tous les objectifs tenus à chaque fois (colonne 13–18 %).
+Aucun preset ne s'arrête ni ne reste collé en haut sur 10 min.
 
 Coût mesuré : ~3 ms CPU par pas fixe (800 particules), 1 pas par frame à 60 fps.
 
@@ -169,6 +183,7 @@ Coût mesuré : ~3 ms CPU par pas fixe (800 particules), 1 pas par frame à 60 f
 2. ✅ Particules Clavet 2005 : cohésion, viscosité, collisions, grille spatiale, rendu debug.
 3. ✅ Thermique : cycle chauffe/montée/refroidissement/descente, presets, banc headless.
    ✅ 3 bis : ambiance stratifiée, chauffe localisée, viscosité thermique (gouttes 40–150, têtes > 90 %).
+   ✅ 3 ter : chaleur latente contre la fontaine permanente ; vitesse jusqu'à ×10.
 4. Rendu raymarching du champ de densité dans le volume du verre (bornage par le profil).
 5. Matériaux : verre réfractif, liquide teinté, cire émissive/subsurface, glow de l'ampoule.
 6. Perf : profiling, résolution du raymarch adaptative, budget 60 fps.
