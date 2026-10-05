@@ -104,6 +104,7 @@ function run(stage: Stage): void {
     glass: stage.lamp.glassParams,
     updateGlass: stage.lamp.updateGlass,
     room: stage.room,
+    autoOrbit: stage.autoOrbit,
     post: stage.post.params,
     adaptive: stage.quality.params,
     waxView: stage.waxDebug.params,

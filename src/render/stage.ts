@@ -36,6 +36,25 @@ export const DEFAULT_ROOM_PARAMS: RoomParams = {
   bulbLight: 1.6,
 };
 
+/** Orbite automatique de la caméra quand personne ne touche à la scène. */
+export interface AutoOrbitParams {
+  enabled: boolean;
+  /** Inactivité avant que la caméra se mette à tourner (s). */
+  delay: number;
+  /** Vitesse de croisière, en tours par minute. */
+  speed: number;
+}
+
+export const DEFAULT_AUTO_ORBIT_PARAMS: AutoOrbitParams = {
+  enabled: true,
+  delay: 1.5,
+  // Un tour en deux minutes : on sent que ça bouge, sans que ça attire l'œil.
+  speed: 0.5,
+};
+
+/** Constante de temps de la mise en vitesse de l'orbite (s) : départ sans à-coup. */
+const AUTO_ORBIT_EASE = 1.2;
+
 /** Hauteur de la lampe + marge de cadrage, et rayon apparent à garder dans le champ. */
 const FRAME_MARGIN = 1.3;
 const FRAME_RADIUS = 1.15;
@@ -59,6 +78,7 @@ export class Stage {
   readonly quality: AdaptiveQuality;
   readonly themes = new ThemeBlender();
   readonly room: RoomParams = { ...DEFAULT_ROOM_PARAMS };
+  readonly autoOrbit: AutoOrbitParams = { ...DEFAULT_AUTO_ORBIT_PARAMS };
   /** Temps GPU de toute la frame (scène + post-process), ms. */
   readonly gpuTimer: GpuTimer;
   /** Temps CPU de soumission du rendu, ms. */
@@ -77,6 +97,12 @@ export class Stage {
   private readonly floor: THREE.Mesh;
   private readonly themeState: ThemeTarget;
   private pixelRatio = 1;
+  /** Temps écoulé depuis la dernière manipulation de la caméra (s). */
+  private idleTime = 0;
+  /** L'utilisateur tient la caméra (glisser, pincer). */
+  private interacting = false;
+  /** Fraction [0, 1] de la vitesse d'orbite atteinte (montée progressive). */
+  private orbitBlend = 0;
 
   constructor(container: HTMLElement, profile: LampProfile, wax: WaxSystem) {
     this.container = container;
@@ -121,6 +147,20 @@ export class Stage {
     this.controls.minPolarAngle = 0.05;
     this.controls.maxPolarAngle = Math.PI * 0.5 - 0.04;
     this.controls.update();
+    // Orbite automatique : coupée net dès qu'on attrape la caméra, relancée après
+    // `autoOrbit.delay` secondes d'inactivité (zoom molette compris).
+    const grab = (): void => {
+      this.interacting = true;
+      this.idleTime = 0;
+      this.orbitBlend = 0;
+    };
+    this.controls.addEventListener('start', grab);
+    this.controls.addEventListener('end', () => {
+      this.interacting = false;
+      this.idleTime = 0;
+    });
+    // Respect du réglage système « réduire les animations ».
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) this.autoOrbit.enabled = false;
 
     this.hemi = new THREE.HemisphereLight(0x8090b0, 0x1a1210, 1);
     this.key = new THREE.DirectionalLight(0xffffff, 1);
@@ -244,7 +284,8 @@ export class Stage {
     this.waxSurface.power = p;
     this.waxDebug.update(wax, alpha);
     this.waxSurface.update(wax, alpha, frameDt);
-    this.controls.update();
+    this.updateAutoOrbit(frameDt);
+    this.controls.update(frameDt);
 
     const t0 = performance.now();
     this.gpuTimer.begin();
@@ -252,6 +293,18 @@ export class Stage {
     this.gpuTimer.end();
     const ms = performance.now() - t0;
     this.renderCpuMs += (ms - this.renderCpuMs) * 0.05;
+  }
+
+  /** Rotation lente autour de la lampe après un temps d'inactivité, avec mise en vitesse douce. */
+  private updateAutoOrbit(dt: number): void {
+    const o = this.autoOrbit;
+    if (!this.interacting) this.idleTime += dt;
+    const active = o.enabled && !this.interacting && this.idleTime >= o.delay;
+    const target = active ? 1 : 0;
+    this.orbitBlend += (target - this.orbitBlend) * (1 - Math.exp(-dt / AUTO_ORBIT_EASE));
+    // OrbitControls : autoRotateSpeed 1 = un tour par minute quand update() reçoit le dt.
+    this.controls.autoRotate = this.orbitBlend > 1e-3;
+    this.controls.autoRotateSpeed = o.speed * this.orbitBlend;
   }
 
   dispose(): void {

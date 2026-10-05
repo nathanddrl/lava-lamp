@@ -6,7 +6,7 @@ import type { DensityFieldParams } from '../render/densityField';
 import type { GlassParams } from '../render/lamp';
 import type { PostParams } from '../render/postprocess';
 import type { AdaptiveQualityParams } from '../render/quality';
-import type { RoomParams } from '../render/stage';
+import type { AutoOrbitParams, RoomParams } from '../render/stage';
 import type { WaxSurfaceParams } from '../render/waxSurfaceView';
 
 /** Compteurs mis à jour par la boucle et affichés en lecture seule. */
@@ -35,6 +35,7 @@ export interface DebugPanelTargets {
   glass: GlassParams;
   updateGlass: () => void;
   room: RoomParams;
+  autoOrbit: AutoOrbitParams;
   post: PostParams;
   adaptive: AdaptiveQualityParams;
   waxView: { visible: boolean; sphereRadius: number };
@@ -148,6 +149,12 @@ export function createDebugPanel(t: DebugPanelTargets): GUI {
   room.add(t.halo, 'intensity', 0, 3, 0.01).name('halo au sol');
   room.add(t.halo, 'reach', 0.2, 4, 0.05).name('portée du halo');
   room.close();
+
+  const orbit = render.addFolder('Orbite automatique');
+  orbit.add(t.autoOrbit, 'enabled').name('active');
+  orbit.add(t.autoOrbit, 'delay', 0, 10, 0.1).name('après inactivité (s)');
+  orbit.add(t.autoOrbit, 'speed', 0, 4, 0.05).name('vitesse (tours/min)');
+  orbit.close();
 
   const post = render.addFolder('Post-process');
   post.add(t.post, 'enabled').name('actif');

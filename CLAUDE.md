@@ -265,6 +265,10 @@ Pipeline par frame : splatting CPU → upload texture 3D → raymarch dans le ve
   après 8 s à la cible. Une baisse qui ne gagne pas 5 % est annulée et bloque la descente
   1 min (vsync 30 Hz, physique CPU) ; un niveau qui a échoué n'est pas réessayé avant 1 min.
   Pointeur grossier (tactile) → départ au niveau « basse ».
+- **Orbite automatique** (`stage.autoOrbit`) : après 1.5 s sans toucher la caméra, elle
+  tourne autour de la lampe à 0.5 tour/min (`autoRotate` d'OrbitControls, `update(dt)`),
+  avec une mise en vitesse exponentielle (τ 1.2 s) ; coupée net à l'événement `start` des
+  contrôles (glisser, pincer, molette). Désactivée si `prefers-reduced-motion`.
 - **Robustesse** : `visibilitychange` coupe la boucle ; cadrage recalculé au passage
   portrait ↔ paysage (hauteur × 1.3, cible abaissée de 0.3 pour dégager la barre) ;
   message dédié si WebGL2 absent ou contexte perdu.

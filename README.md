@@ -33,7 +33,8 @@ point chaud fonde.
 | `D` | Panneau de debug (lil-gui) |
 
 La barre se retire après quelques secondes sans interaction et revient au moindre
-mouvement ou toucher.
+mouvement ou toucher. Laissée tranquille 1,5 s, la caméra tourne lentement autour de la
+lampe (un tour en deux minutes) ; elle s'arrête dès qu'on la reprend en main.
 
 ## Architecture
 
