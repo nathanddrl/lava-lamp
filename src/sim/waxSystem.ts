@@ -80,6 +80,13 @@ export interface WaxParams {
    * (chaleur latente, surfusion). 0 = flottabilité linéaire pure.
    */
   meltHysteresis: number;
+  /**
+   * Chaleur latente, modélisée en temps : une particule figée doit rester au-dessus de
+   * Tn + δ/2 pendant `meltDelay` secondes avant de fondre. La cire aspirée par une
+   * colonne traverse le point chaud trop vite pour fondre : la colonne se tarit et le
+   * point chaud lâche des paquets (goutte à goutte) au lieu d'un jet continu. 0 = immédiat.
+   */
+  meltDelay: number;
   /** Taux de chauffe au fond du récipient, 1/s. */
   heatRate: number;
   /** Hauteur caractéristique de décroissance de la chauffe au-dessus du fond. */
@@ -154,10 +161,12 @@ export const DEFAULT_WAX_PARAMS: WaxParams = {
   buoyancyMax: 1000,
   neutralTemperature: 0.5,
   meltHysteresis: 0.3,
+  // Chaleur latente : sans elle, la colonne devient une fontaine permanente (jet).
+  meltDelay: 2.5,
   // Point chaud mince et étroit : seule une petite fraction du réservoir fond à la fois.
   heatRate: 4,
   heatFalloff: 0.03,
-  heatRadius: 0.05,
+  heatRadius: 0.06,
   // Ambiance stratifiée : sous la bande morte au fond (le réservoir reste figé),
   // au centre de la bande au milieu (aucune bascule en route), froide sous le capuchon.
   coolRate: 0.1,
@@ -217,6 +226,8 @@ export class WaxSystem {
   densities = new Float32Array(0);
   /** État de fusion par particule (1 = fondue, flottante), cf. `meltHysteresis`. */
   molten = new Uint8Array(0);
+  /** Temps cumulé au-dessus du seuil de fusion par une particule encore figée (s). */
+  private meltTimer = new Float32Array(0);
 
   private predictedFrom = new Float32Array(0);
   private neighborCount = new Int32Array(0);
@@ -239,6 +250,7 @@ export class WaxSystem {
       this.temperatures = new Float32Array(n);
       this.densities = new Float32Array(n);
       this.molten = new Uint8Array(n);
+      this.meltTimer = new Float32Array(n);
       this.predictedFrom = new Float32Array(3 * n);
       this.neighborCount = new Int32Array(n);
       this.neighbors = new Int32Array(n * MAX_NEIGHBORS);
@@ -264,6 +276,7 @@ export class WaxSystem {
     this.temperatures.fill(0);
     this.densities.fill(this.params.restDensity);
     this.molten.fill(0);
+    this.meltTimer.fill(0);
     this.previousStepPositions.set(this.positions);
   }
 
@@ -319,14 +332,22 @@ export class WaxSystem {
   }
 
   private applyExternalForces(dt: number): void {
-    const { velocities, temperatures, molten, count } = this;
-    const { gravity, buoyancy, buoyancyMax, neutralTemperature, meltHysteresis, drag } = this.params;
+    const { velocities, temperatures, molten, meltTimer, count } = this;
+    const { gravity, buoyancy, buoyancyMax, neutralTemperature, meltHysteresis, meltDelay, drag } = this.params;
     const damp = Math.max(0, 1 - drag * dt);
     const saturate = Number.isFinite(buoyancyMax) && buoyancyMax > 0;
     const half = 0.5 * Math.max(0, meltHysteresis);
     for (let i = 0; i < count; i++) {
       const t = temperatures[i]!;
-      if (t > neutralTemperature + half) molten[i] = 1;
+      if (!molten[i] && t > neutralTemperature + half) {
+        meltTimer[i]! += dt;
+        if (meltTimer[i]! >= meltDelay) {
+          molten[i] = 1;
+          meltTimer[i] = 0;
+        }
+      } else if (!molten[i]) {
+        meltTimer[i] = Math.max(0, meltTimer[i]! - dt);
+      }
       else if (t < neutralTemperature - half) molten[i] = 0;
       const tn = molten[i] ? neutralTemperature - half : neutralTemperature + half;
       const linear = buoyancy * (t - tn);

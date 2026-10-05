@@ -80,6 +80,7 @@ export function createDebugPanel(t: DebugPanelTargets): GUI {
   th.add(w, 'buoyancyMax', 0.5, 1000, 0.5).name('flottabilité max');
   th.add(w, 'neutralTemperature', 0, 1, 0.01).name('T neutre');
   th.add(w, 'meltHysteresis', 0, 0.8, 0.01).name('hystérésis fusion');
+  th.add(w, 'meltDelay', 0, 6, 0.05).name('délai de fusion (s)');
 
   const render = gui.addFolder('Rendu');
   render.add(t.waxView, 'visible').name('sphères debug');

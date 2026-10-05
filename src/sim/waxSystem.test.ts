@@ -31,6 +31,29 @@ function clusters(sim: Simulation): number[] {
   return [...sizes.values()].sort((a, b) => b - a);
 }
 
+/** Hauteur max (normalisée) atteinte par les amas qui touchent le fond (réservoir). */
+function reservoirTop(sim: Simulation): number {
+  const { positions: x, count: n } = sim.wax;
+  const { yMin, yMax } = sim.container;
+  const link = 0.9 * sim.wax.params.interactionRadius;
+  const parent = Int32Array.from({ length: n }, (_, i) => i);
+  const find = (a: number): number => {
+    while (parent[a] !== a) a = parent[a] = parent[parent[a]!]!;
+    return a;
+  };
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const d2 = (x[3 * i]! - x[3 * j]!) ** 2 + (x[3 * i + 1]! - x[3 * j + 1]!) ** 2 + (x[3 * i + 2]! - x[3 * j + 2]!) ** 2;
+      if (d2 < link * link) parent[find(i)] = find(j);
+    }
+  }
+  const touching = new Set<number>();
+  for (let i = 0; i < n; i++) if (x[3 * i + 1]! < yMin + 0.12) touching.add(find(i));
+  let top = 0;
+  for (let i = 0; i < n; i++) if (touching.has(find(i))) top = Math.max(top, x[3 * i + 1]!);
+  return (top - yMin) / (yMax - yMin);
+}
+
 function stats(sim: Simulation) {
   const { positions: x, velocities: v, count: n } = sim.wax;
   const c = sim.container;
@@ -78,7 +101,7 @@ describe('WaxSystem (Clavet 2005)', () => {
     expect(clusters(sim)[0]).toBeGreaterThanOrEqual(sim.wax.count - 2);
   }, 60_000);
 
-  it('cycle thermique (preset par défaut) : des têtes atteignent le haut, le réservoir tient, ça ne s\'arrête pas', () => {
+  it('cycle thermique (preset par défaut) : des têtes atteignent le haut, le réservoir tient, pas de colonne permanente, ça ne s\'arrête pas', () => {
     const sim = new Simulation(new LampProfile());
     const { yMin, yMax } = sim.container;
     const H = yMax - yMin;
@@ -86,6 +109,8 @@ describe('WaxSystem (Clavet 2005)', () => {
     let idle = 0;
     let longestIdle = 0;
     let minReservoir = 1;
+    let columnSamples = 0;
+    let samples = 0;
     for (let t = 0; t < 180; t += 2) {
       run(sim, 2);
       const { positions: x, temperatures: T, count: n } = sim.wax;
@@ -101,6 +126,8 @@ describe('WaxSystem (Clavet 2005)', () => {
         if (y > yMin + 0.9 * H) high = true;
       }
       if (t < 60) continue;
+      samples++;
+      if (reservoirTop(sim) > 0.8) columnSamples++;
       if (high) highSamples++;
       minReservoir = Math.min(minReservoir, bottom / n);
       idle = upper < 0.01 * n ? idle + 2 : 0;
@@ -109,5 +136,7 @@ describe('WaxSystem (Clavet 2005)', () => {
     expect(highSamples).toBeGreaterThan(0); // des têtes dépassent 90 % de la hauteur
     expect(minReservoir).toBeGreaterThanOrEqual(0.4); // le réservoir garde au moins 40 %
     expect(longestIdle).toBeLessThan(60); // jamais de minute sans cire en haut
+    // Pas de fontaine : le réservoir n'est relié au haut de la lampe que par intermittence.
+    expect(columnSamples / samples).toBeLessThan(0.3);
   }, 120_000);
 });
