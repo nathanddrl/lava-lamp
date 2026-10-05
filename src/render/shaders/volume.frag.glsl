@@ -1,5 +1,10 @@
-// Cire : raymarching de l'isosurface du champ de densité (texture 3D), passe opaque.
-// Préfixé par volumeCommon.glsl.
+// Cire + liquide en une passe : le rayon entre dans le liquide par la face avant du
+// volume intérieur, y est réfracté (air → liquide, à travers une paroi de verre mince),
+// puis on raymarche l'isosurface du champ de densité (texture 3D) en accumulant le
+// liquide. Préfixé par volumeCommon.glsl.
+//
+// Sortie prémultipliée : cire touchée → opaque, avec gl_FragDepth au point touché ;
+// sinon le liquide seul, alpha = opacité moyenne, profondeur = face d'entrée.
 
 // Fourni par Three.js mais pas déclaré dans le préfixe des fragment shaders.
 uniform mat4 projectionMatrix;
@@ -13,6 +18,8 @@ uniform vec3 uOccupancyDims;
 uniform float uBlockSize;        // côté d'un bloc d'occupation (unités monde)
 uniform float uThreshold;
 uniform int uSteps;
+uniform bool uWaxVisible;
+uniform float uIor;              // indice du liquide (le verre mince ne dévie pas en net)
 
 uniform vec3 uWaxColor;          // cire froide
 uniform vec3 uWaxHotColor;       // cire chaude
@@ -59,66 +66,12 @@ float wrapDiffuse(vec3 n, vec3 l, float w) {
   return max(0.0, (dot(n, l) + w) / (1.0 + w));
 }
 
-void main() {
-  vec3 ro = cameraPosition;
-  vec3 toBack = vWorldPos - ro;
-  float tBack = length(toBack);
-  vec3 rd = toBack / tBack;
+float depthOf(vec3 p) {
+  vec4 clip = projectionMatrix * viewMatrix * vec4(p, 1.0);
+  return clamp(clip.z / clip.w * 0.5 + 0.5, 0.0, 1.0);
+}
 
-  vec2 tb = boundsIntersect(ro, rd);
-  float t0 = max(tb.x, 0.0);
-  float t1 = min(tb.y, tBack);
-  if (t1 <= t0) discard;
-
-  // Pas uniforme sur le segment, jamais plus fin qu'un demi-voxel.
-  float dt = max((t1 - t0) / float(uSteps), 0.5 * uVoxel);
-
-  vec3 transmittance = vec3(1.0);
-  vec3 inscatter = vec3(0.0);
-  vec3 invRd = 1.0 / rd;
-  float t = t0;
-  float tPrev = t0;
-  float tHit = -1.0;
-  int fineSteps = 0;
-  for (int i = 0; i < MAX_STEPS; i++) {
-    vec3 p = ro + rd * t;
-    vec3 block = floor((p - uFieldMin) / uBlockSize);
-    if (texture(uOccupancy, (block + 0.5) / uOccupancyDims).r < 0.5) {
-      // Bloc vide : saut direct à sa sortie (le liquide y est intégré d'un seul segment).
-      vec3 bmin = uFieldMin + block * uBlockSize;
-      vec3 ta = (bmin - ro) * invRd;
-      vec3 tb = (bmin + uBlockSize - ro) * invRd;
-      vec3 tfar = max(ta, tb);
-      float tNext = min(min(min(tfar.x, tfar.y), tfar.z) + 1e-3, t1);
-      vec3 mid = ro + rd * (0.5 * (tPrev + tNext));
-      integrateLiquid(mid, liquidMask(mid), tNext - tPrev, transmittance, inscatter);
-      tPrev = tNext;
-      t = tNext;
-      if (t >= t1) break;
-      continue;
-    }
-    float m = liquidMask(p);
-    float d = fieldAt(p).r * m;
-    if (d >= uThreshold) {
-      // Raffinement par bissection entre le dernier point dehors et le premier dedans.
-      float a = tPrev;
-      float b = t;
-      for (int k = 0; k < BISECTIONS; k++) {
-        float mid = 0.5 * (a + b);
-        if (waxDensity(ro + rd * mid) >= uThreshold) b = mid; else a = mid;
-      }
-      tHit = b;
-      integrateLiquid(ro + rd * (0.5 * (tPrev + b)), m, b - tPrev, transmittance, inscatter);
-      break;
-    }
-    integrateLiquid(p, m, t - tPrev, transmittance, inscatter);
-    tPrev = t;
-    if (t >= t1 || ++fineSteps >= uSteps) break;
-    t = min(t + dt, t1);
-  }
-  if (tHit < 0.0) discard;
-
-  vec3 p = ro + rd * tHit;
+vec3 shadeWax(vec3 p, vec3 rd) {
   vec3 n = waxNormal(p);
   vec3 v = -rd;
 
@@ -145,10 +98,13 @@ void main() {
   vec3 toBulb = uBulbPosition - p;
   float bulbDist = length(toBulb);
   vec3 lb = toBulb / bulbDist;
-  float bulbFalloff = uBulbIntensity / (1.0 + 4.0 * bulbDist * bulbDist);
+  float bulb = uBulbIntensity * uPower;
+  // Ampoule large (diffusée par le fond de verre) : pas de point brûlé juste au-dessus.
+  float bulbFalloff = bulb / (1.0 + 10.0 * bulbDist * bulbDist);
   float bulbNear = exp(-max(0.0, p.y - uYMin) / uBulbReach);
 
   // Éclairage cireux : diffusion « wrap » (pas de terminateur dur), peu de spéculaire.
+  // Pièce sombre : l'ampoule domine, la clé et le contre-jour ne font que dessiner.
   vec3 diffuse =
       uKeyColor * wrapDiffuse(n, uKeyDirection, uWrap) +
       uRimColor * wrapDiffuse(n, uRimDirection, uWrap) +
@@ -159,22 +115,90 @@ void main() {
   // Faux subsurface : lumière de l'ampoule transmise à travers l'épaisseur, renforcée
   // à contre-jour (l'œil regarde vers l'ampoule à travers la cire).
   float backLit = 0.4 + 0.6 * pow(max(0.0, dot(v, -lb)), 2.0);
-  vec3 sss = uWaxDeepColor * uBulbColor * (bulbFalloff + 0.3) * transmission * backLit * uSubsurface;
-  color += sss;
+  color += uWaxDeepColor * uBulbColor * (bulbFalloff + 0.3 * uPower) * transmission * backLit * uSubsurface;
 
   // Émission : cire chaude, et proche de l'ampoule (cire éclairée en profondeur).
-  color += uWaxHotColor * uEmission * (0.25 * hot + bulbNear) * (0.5 + 0.5 * transmission);
+  // Dépasse 1 en linéaire près du fond : c'est ce que le bloom attrape.
+  color += uWaxHotColor * uEmission * uPower * (0.35 * hot + 0.9 * bulbNear) * (0.5 + 0.5 * transmission);
 
   // Fresnel doux : un voile de lumière du liquide sur les bords, pas de reflet net.
   float fres = pow(1.0 - max(0.0, dot(n, v)), 3.0) * uFresnel;
   vec3 h = normalize(uKeyDirection + v);
   float spec = pow(max(0.0, dot(n, h)), 12.0) * 0.06;
-  color = mix(color, uLiquidScatter * liquidLight(p) + uAmbientColor, fres) + uKeyColor * spec;
+  return mix(color, uLiquidScatter * liquidLight(p) + uAmbientColor, fres) + uKeyColor * spec;
+}
 
-  gl_FragColor = vec4(color * transmittance + inscatter, 1.0);
+void main() {
+  vec3 view = normalize(vWorldPos - cameraPosition);
+  vec3 n = normalize(vWorldNormal);
+  // Réfraction à l'entrée : le cylindre de liquide agit comme une lentille, la cire
+  // paraît élargie et se déforme près des bords du verre.
+  vec3 rd = refract(view, n, 1.0 / uIor);
+  if (dot(rd, rd) < 1e-6) rd = view;
+  vec3 ro = vWorldPos - n * 1e-3;
 
-  vec4 clip = projectionMatrix * viewMatrix * vec4(p, 1.0);
-  gl_FragDepth = clamp(clip.z / clip.w * 0.5 + 0.5, 0.0, 1.0);
+  float t0 = 0.0;
+  float t1 = boundsIntersect(ro, rd).y;
+
+  vec3 transmittance = vec3(1.0);
+  vec3 inscatter = vec3(0.0);
+  float tHit = -1.0;
+
+  if (t1 > t0) {
+    // Pas uniforme sur le segment, jamais plus fin qu'un demi-voxel.
+    float dt = max((t1 - t0) / float(uSteps), 0.5 * uVoxel);
+    vec3 invRd = 1.0 / rd;
+    float t = t0;
+    float tPrev = t0;
+    int fineSteps = 0;
+    for (int i = 0; i < MAX_STEPS; i++) {
+      vec3 p = ro + rd * t;
+      vec3 block = floor((p - uFieldMin) / uBlockSize);
+      if (!uWaxVisible || texture(uOccupancy, (block + 0.5) / uOccupancyDims).r < 0.5) {
+        // Bloc vide : saut direct à sa sortie (le liquide y est intégré d'un seul segment).
+        vec3 bmin = uFieldMin + block * uBlockSize;
+        vec3 ta = (bmin - ro) * invRd;
+        vec3 tb = (bmin + uBlockSize - ro) * invRd;
+        vec3 tfar = max(ta, tb);
+        float tNext = min(min(min(tfar.x, tfar.y), tfar.z) + 1e-3, t1);
+        vec3 mid = ro + rd * (0.5 * (tPrev + tNext));
+        integrateLiquid(mid, liquidMask(mid), tNext - tPrev, transmittance, inscatter);
+        tPrev = tNext;
+        t = tNext;
+        if (t >= t1) break;
+        continue;
+      }
+      float m = liquidMask(p);
+      float d = fieldAt(p).r * m;
+      if (d >= uThreshold) {
+        // Raffinement par bissection entre le dernier point dehors et le premier dedans.
+        float a = tPrev;
+        float b = t;
+        for (int k = 0; k < BISECTIONS; k++) {
+          float mid = 0.5 * (a + b);
+          if (waxDensity(ro + rd * mid) >= uThreshold) b = mid; else a = mid;
+        }
+        tHit = b;
+        integrateLiquid(ro + rd * (0.5 * (tPrev + b)), m, b - tPrev, transmittance, inscatter);
+        break;
+      }
+      integrateLiquid(p, m, t - tPrev, transmittance, inscatter);
+      tPrev = t;
+      if (t >= t1 || ++fineSteps >= uSteps) break;
+      t = min(t + dt, t1);
+    }
+  }
+
+  if (tHit >= 0.0) {
+    vec3 p = ro + rd * tHit;
+    gl_FragColor = vec4(shadeWax(p, rd) * transmittance + inscatter, 1.0);
+    gl_FragDepth = depthOf(p);
+  } else {
+    // Prémultiplié : couleur de fond × transmittance moyenne + lumière diffusée.
+    float alpha = 1.0 - dot(transmittance, vec3(1.0 / 3.0));
+    gl_FragColor = vec4(inscatter, alpha);
+    gl_FragDepth = gl_FragCoord.z;
+  }
 
   #include <tonemapping_fragment>
   #include <colorspace_fragment>

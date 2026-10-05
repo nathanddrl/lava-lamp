@@ -139,4 +139,25 @@ describe('WaxSystem (Clavet 2005)', () => {
     // Pas de fontaine : le réservoir n'est relié au haut de la lampe que par intermittence.
     expect(columnSamples / samples).toBeLessThan(0.3);
   }, 120_000);
+
+  it('disposition « settled » : cire froide tassée au fond, stable sans chauffe', () => {
+    const profile = new LampProfile();
+    const sim = new Simulation(profile, NO_THERMAL_PARAMS);
+    sim.reset('settled');
+    const w = sim.wax;
+    const H = profile.yMax - profile.yMin;
+    const check = () => {
+      for (let i = 0; i < w.count; i++) {
+        const x = w.positions[3 * i]!;
+        const y = w.positions[3 * i + 1]!;
+        const z = w.positions[3 * i + 2]!;
+        expect(y).toBeGreaterThanOrEqual(profile.yMin);
+        expect((y - profile.yMin) / H).toBeLessThan(0.15);
+        expect(Math.hypot(x, z)).toBeLessThanOrEqual(profile.innerRadius(y) + 1e-6);
+      }
+    };
+    check();
+    for (let k = 0; k < 120; k++) sim.step(SIM_FIXED_DT);
+    check();
+  });
 });

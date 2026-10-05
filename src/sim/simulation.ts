@@ -1,5 +1,5 @@
 import type { ContainerShape } from './lampProfile';
-import { DEFAULT_WAX_PARAMS, WaxSystem, type WaxParams } from './waxSystem';
+import { DEFAULT_WAX_PARAMS, WaxSystem, type WaxLayout, type WaxParams } from './waxSystem';
 
 export interface SimulationParams {
   /** Multiplicateur appliqué au temps réel avant l'accumulateur. */
@@ -31,8 +31,8 @@ export class Simulation {
     this.stepCount++;
   }
 
-  reset(): void {
-    this.wax.reset();
+  reset(layout: WaxLayout = 'cloud'): void {
+    this.wax.reset(layout);
     this.time = 0;
     this.stepCount = 0;
   }

@@ -1,6 +1,7 @@
-// Partagé par la cire (passe opaque) et le liquide (passe transparente).
+// Fonctions du liquide et du récipient, préfixées à volume.frag.glsl.
 
 varying vec3 vWorldPos;
+varying vec3 vWorldNormal;
 
 // Rayon intérieur du verre en fonction de la hauteur normalisée (LampProfile.innerRadius).
 uniform sampler2D uRadiusLut;
@@ -12,11 +13,13 @@ uniform float uWallSoftness;
 
 uniform vec3 uLiquidAbsorption;  // coefficient d'extinction par canal (1/unité)
 uniform vec3 uLiquidScatter;     // couleur diffusée par le liquide
+uniform float uLiquidGlow;       // coefficient de diffusion (1/unité), découplé de l'absorption
 uniform vec3 uBulbPosition;
 uniform vec3 uBulbColor;
 uniform float uBulbIntensity;
 uniform float uLiquidGlowHeight; // hauteur caractéristique de la lueur de l'ampoule
 uniform vec3 uAmbientColor;
+uniform float uPower;            // puissance de la lampe (0 = éteinte, 1 = régime), allumage
 
 // 1 dans le liquide, 0 hors du récipient, transition douce contre le verre.
 float liquidMask(vec3 p) {
@@ -46,14 +49,15 @@ vec3 liquidLight(vec3 p) {
   vec3 toBulb = p - uBulbPosition;
   float spread = exp(-dot(toBulb.xz, toBulb.xz) * 2.0);
   float glow = exp(-above / uLiquidGlowHeight) * (0.35 + 0.65 * spread);
-  return uBulbColor * uBulbIntensity * glow + uAmbientColor;
+  return uBulbColor * (uBulbIntensity * uPower * glow) + uAmbientColor;
 }
 
 // Intègre le liquide sur un segment de longueur ds (masque m) : transmittance et
-// lumière diffusée vers l'œil, en émission-absorption.
+// lumière diffusée vers l'œil. Diffusion et absorption sont séparées : un liquide
+// jaune absorbe peu le rouge mais doit quand même briller de sa couleur.
 void integrateLiquid(vec3 p, float m, float ds, inout vec3 transmittance, inout vec3 inscatter) {
   if (m <= 0.0) return;
   vec3 stepT = exp(-uLiquidAbsorption * m * ds);
-  inscatter += transmittance * (1.0 - stepT) * uLiquidScatter * liquidLight(p);
+  inscatter += transmittance * uLiquidScatter * liquidLight(p) * (uLiquidGlow * m * ds);
   transmittance *= stepT;
 }
